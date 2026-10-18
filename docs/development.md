@@ -32,7 +32,7 @@ behind the others.
 | `docker-build-runtime` | | Runtime image (`RUNTIME_IMG`, default `omp-operator-runtime:dev`) |
 | `docker-build-e2e` | | e2e image: the driver plus `test/fakeomp` installed as `omp` (`E2E_IMG`, default `omp-operator-e2e:dev`) |
 | `ompcompat` | | Downloads the pinned omp release into `bin/`, checks it against the release's `SHA256SUMS.txt`, and runs `test/ompcompat` against it |
-| `test-e2e` | `docker-build`, `docker-build-e2e` | Creates a kind cluster `omp-operator-e2e` (unless it exists), runs the e2e suite, and deletes the cluster on exit |
+| `test-e2e` | `docker-build`, `docker-build-e2e` | Creates a kind cluster `omp-operator-e2e` (unless it exists) with its own kubeconfig in `bin/` (your `~/.kube/config` is never touched), runs the e2e suite, and deletes the cluster on exit |
 
 `mise run run` starts the manager, which needs `POD_NAMESPACE` (it refuses to start without it) and a writable
 data directory (the default `/data` usually is not). With explicit flags:

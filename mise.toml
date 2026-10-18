@@ -122,9 +122,14 @@ set -euo pipefail
 export IMG="${IMG:-omp-operator:dev}"
 export E2E_IMG="${E2E_IMG:-omp-operator-e2e:dev}"
 export KIND_CLUSTER=omp-operator-e2e
-if ! kind get clusters | grep -qx "$KIND_CLUSTER"; then
+# A dedicated kubeconfig: kind create/delete must never touch ~/.kube/config.
+mkdir -p bin
+export KUBECONFIG="$PWD/bin/$KIND_CLUSTER.kubeconfig"
+if kind get clusters | grep -qx "$KIND_CLUSTER"; then
+  kind export kubeconfig --name "$KIND_CLUSTER"
+else
   kind create cluster --name "$KIND_CLUSTER"
 fi
-trap 'kind delete cluster --name "$KIND_CLUSTER"' EXIT
+trap 'kind delete cluster --name "$KIND_CLUSTER"; rm -f "$KUBECONFIG"' EXIT
 go test -tags e2e ./test/e2e/ -v -ginkgo.v -timeout 30m
 '''
