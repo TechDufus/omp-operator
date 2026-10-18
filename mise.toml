@@ -22,6 +22,7 @@ run = 'go tool controller-gen rbac:roleName=manager-role crd paths="./..." outpu
 [tasks.chart-sync]
 description = "Copy generated CRDs and RBAC rules into the Helm chart"
 depends = ["manifests"]
+shell = "bash -c"
 run = '''
 set -euo pipefail
 rm -rf charts/omp-operator/crds
@@ -35,6 +36,7 @@ yq '.rules' config/rbac/role.yaml > charts/omp-operator/files/rules.yaml
 [tasks.verify-generated]
 description = "Fail when generated files differ from the committed ones"
 depends = ["chart-sync"]
+shell = "bash -c"
 run = '''
 set -euo pipefail
 out="$(git status --porcelain)"
@@ -54,6 +56,7 @@ run = "golangci-lint run"
 [tasks.test]
 description = "Run go vet and unit, envtest and chart tests"
 depends = ["manifests"]
+shell = "bash -c"
 run = '''
 set -euo pipefail
 go vet ./...
@@ -95,6 +98,7 @@ run = 'docker build -f images/e2e/Dockerfile -t "${E2E_IMG:-omp-operator-e2e:dev
 
 [tasks.ompcompat]
 description = "Run compatibility tests against the pinned real omp"
+shell = "bash -c"
 run = '''
 set -euo pipefail
 mkdir -p bin
@@ -112,6 +116,7 @@ OMP_BIN="$PWD/bin/omp-linux-x64" go test -tags ompcompat ./test/ompcompat/ -v -c
 [tasks.test-e2e]
 description = "Run the e2e suite on a kind cluster"
 depends = ["docker-build", "docker-build-e2e"]
+shell = "bash -c"
 run = '''
 set -euo pipefail
 export IMG="${IMG:-omp-operator:dev}"
