@@ -1,0 +1,9 @@
+apiVersion: omp.techdufus.com/v1alpha1
+kind: OmpTrigger
+metadata:
+  labels:
+    app.kubernetes.io/name: omp-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: omptrigger-sample
+spec:
+  # TODO(user): Add fields here

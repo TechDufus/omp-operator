@@ -1,0 +1,11 @@
+apiVersion: v2
+name: omp-operator
+description: Kubernetes operator that runs omp (oh-my-pi) agents on webhooks and schedules
+type: application
+version: 0.0.0
+appVersion: v0.0.0
+home: https://github.com/TechDufus/omp-operator
+sources:
+  - https://github.com/TechDufus/omp-operator
+annotations:
+  artifacthub.io/license: Apache-2.0

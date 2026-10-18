@@ -1,0 +1,7 @@
+## Append samples of your project ##
+resources:
+- omp_v1alpha1_ompagent.yaml
+- omp_v1alpha1_omptrigger.yaml
+- omp_v1alpha1_ompsession.yaml
+- omp_v1alpha1_ompaction.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

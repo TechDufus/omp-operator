@@ -1,0 +1,35 @@
+- apiGroups:
+    - omp.techdufus.com
+  resources:
+    - ompactions
+    - ompagents
+    - ompsessions
+    - omptriggers
+  verbs:
+    - create
+    - delete
+    - get
+    - list
+    - patch
+    - update
+    - watch
+- apiGroups:
+    - omp.techdufus.com
+  resources:
+    - ompactions/finalizers
+    - ompagents/finalizers
+    - ompsessions/finalizers
+    - omptriggers/finalizers
+  verbs:
+    - update
+- apiGroups:
+    - omp.techdufus.com
+  resources:
+    - ompactions/status
+    - ompagents/status
+    - ompsessions/status
+    - omptriggers/status
+  verbs:
+    - get
+    - patch
+    - update

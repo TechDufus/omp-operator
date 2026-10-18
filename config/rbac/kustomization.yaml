@@ -1,0 +1,37 @@
+resources:
+# All RBAC will be applied under this service account in
+# the deployment namespace. You may comment out this resource
+# if your manager will use a service account that exists at
+# runtime. Be sure to update RoleBinding and ClusterRoleBinding
+# subjects if changing service account names.
+- service_account.yaml
+- role.yaml
+- role_binding.yaml
+- leader_election_role.yaml
+- leader_election_role_binding.yaml
+# The following RBAC configurations are used to protect
+# the metrics endpoint with authn/authz. These configurations
+# ensure that only authorized users and service accounts
+# can access the metrics endpoint. Comment the following
+# permissions if you want to disable this protection.
+# More info: https://book.kubebuilder.io/reference/metrics.html
+- metrics_auth_role.yaml
+- metrics_auth_role_binding.yaml
+- metrics_reader_role.yaml
+# For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
+# default, aiding admins in cluster management. Those roles are
+# not used by the omp-operator itself. You can comment the following lines
+# if you do not want those helpers be installed with your Project.
+- ompaction_admin_role.yaml
+- ompaction_editor_role.yaml
+- ompaction_viewer_role.yaml
+- ompsession_admin_role.yaml
+- ompsession_editor_role.yaml
+- ompsession_viewer_role.yaml
+- omptrigger_admin_role.yaml
+- omptrigger_editor_role.yaml
+- omptrigger_viewer_role.yaml
+- ompagent_admin_role.yaml
+- ompagent_editor_role.yaml
+- ompagent_viewer_role.yaml
+

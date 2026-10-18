@@ -1,0 +1,125 @@
+[tools]
+"aqua:kubernetes-sigs/kubebuilder" = "4.16.0"
+go = "1.27.2"
+"go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint" = "2.15.0"
+helm = "4.3.0"
+kind = "0.33.0"
+kubectl = "1.37.1"
+yq = "4.54.1"
+
+[env]
+OMP_VERSION = "v18.12.1"
+
+[tasks.generate]
+description = "Generate DeepCopy methods"
+run = 'go tool controller-gen object:headerFile="hack/boilerplate.go.txt",year=2026 paths="./..."'
+
+[tasks.manifests]
+description = "Generate CRDs and the manager ClusterRole"
+depends = ["generate"]
+run = 'go tool controller-gen rbac:roleName=manager-role crd paths="./..." output:crd:artifacts:config=config/crd/bases'
+
+[tasks.chart-sync]
+description = "Copy generated CRDs and RBAC rules into the Helm chart"
+depends = ["manifests"]
+run = '''
+set -euo pipefail
+rm -rf charts/omp-operator/crds
+mkdir -p charts/omp-operator/crds charts/omp-operator/files
+for f in config/crd/bases/*.yaml; do
+  yq '.' "$f" > "charts/omp-operator/crds/$(basename "$f")"
+done
+yq '.rules' config/rbac/role.yaml > charts/omp-operator/files/rules.yaml
+'''
+
+[tasks.verify-generated]
+description = "Fail when generated files differ from the committed ones"
+depends = ["chart-sync"]
+run = '''
+set -euo pipefail
+out="$(git status --porcelain)"
+if [ -n "$out" ]; then
+  echo "generated files are out of date:" >&2
+  echo "$out" >&2
+  git --no-pager diff --stat >&2
+  exit 1
+fi
+'''
+
+[tasks.lint]
+description = "Run golangci-lint"
+depends = ["generate"]
+run = "golangci-lint run"
+
+[tasks.test]
+description = "Run go vet and unit, envtest and chart tests"
+depends = ["manifests"]
+run = '''
+set -euo pipefail
+go vet ./...
+minor="$(go list -m k8s.io/api | cut -d' ' -f2 | cut -d. -f2)"
+KUBEBUILDER_ASSETS="$(go tool setup-envtest use "1.${minor}" --bin-dir "$PWD/bin" -p path)"
+export KUBEBUILDER_ASSETS
+go test $(go list ./... | grep -v -e /test/e2e -e /test/ompcompat) -coverprofile cover.out
+'''
+
+[tasks.ci]
+description = "Lint, test and lint the chart"
+depends = ["lint", "test", "chart-sync"]
+run = "helm lint charts/omp-operator"
+
+[tasks.build]
+description = "Build the manager and the in-pod driver"
+depends = ["generate"]
+run = [
+  "go build -o bin/manager ./cmd",
+  "go build -o bin/omp-operator-driver ./cmd/driver",
+]
+
+[tasks.run]
+description = "Run the manager against the current kubeconfig"
+depends = ["manifests"]
+run = "go run ./cmd"
+
+[tasks.docker-build]
+description = "Build the controller image"
+run = 'docker build -t "${IMG:-omp-operator:dev}" .'
+
+[tasks.docker-build-runtime]
+description = "Build the agent runtime image"
+run = 'docker build -f images/runtime/Dockerfile -t "${RUNTIME_IMG:-omp-operator-runtime:dev}" .'
+
+[tasks.docker-build-e2e]
+description = "Build the e2e runtime image (driver + fake omp)"
+run = 'docker build -f images/e2e/Dockerfile -t "${E2E_IMG:-omp-operator-e2e:dev}" .'
+
+[tasks.ompcompat]
+description = "Run compatibility tests against the pinned real omp"
+run = '''
+set -euo pipefail
+mkdir -p bin
+base="https://github.com/can1357/oh-my-pi/releases/download/${OMP_VERSION}"
+if [ ! -x bin/omp-linux-x64 ] || [ "$(cat bin/omp-linux-x64.version 2>/dev/null)" != "$OMP_VERSION" ]; then
+  curl -fsSL -o bin/omp-linux-x64 "$base/omp-linux-x64"
+  curl -fsSL -o bin/omp-SHA256SUMS.txt "$base/SHA256SUMS.txt"
+  (cd bin && grep ' omp-linux-x64$' omp-SHA256SUMS.txt | sha256sum -c -)
+  chmod +x bin/omp-linux-x64
+  echo "$OMP_VERSION" > bin/omp-linux-x64.version
+fi
+OMP_BIN="$PWD/bin/omp-linux-x64" go test -tags ompcompat ./test/ompcompat/ -v -count=1
+'''
+
+[tasks.test-e2e]
+description = "Run the e2e suite on a kind cluster"
+depends = ["docker-build", "docker-build-e2e"]
+run = '''
+set -euo pipefail
+export IMG="${IMG:-omp-operator:dev}"
+export E2E_IMG="${E2E_IMG:-omp-operator-e2e:dev}"
+export KIND_CLUSTER=omp-operator-e2e
+if ! kind get clusters | grep -qx "$KIND_CLUSTER"; then
+  kind create cluster --name "$KIND_CLUSTER"
+fi
+trap 'kind delete cluster --name "$KIND_CLUSTER"' EXIT
+go test -tags e2e ./test/e2e/ -v -ginkgo.v -timeout 30m
+'''
