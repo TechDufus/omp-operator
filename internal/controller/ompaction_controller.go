@@ -18,19 +18,34 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ompv1alpha1 "github.com/TechDufus/omp-operator/api/v1alpha1"
+	"github.com/TechDufus/omp-operator/internal/actions"
+	"github.com/TechDufus/omp-operator/internal/config"
 )
 
-// OmpActionReconciler reconciles a OmpAction object
+// actionRecheckInterval is how often an OmpAction is re-validated, so that a Secret created
+// or removed later is noticed.
+const actionRecheckInterval = 5 * time.Minute
+
+// OmpActionReconciler reconciles a OmpAction object. Options may be nil in tests; then
+// every namespace is served. Secrets are read through Client, which the manager configures
+// to bypass its cache for Secrets.
 type OmpActionReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme  *runtime.Scheme
+	Options *config.Options
 }
 
 // +kubebuilder:rbac:groups=omp.techdufus.com,resources=ompactions,verbs=get;list;watch;create;update;patch;delete
@@ -42,21 +57,109 @@ type OmpActionReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets;daemonsets,verbs=get;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the OmpAction object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
+// Reconcile validates an OmpAction and reports the result as its Ready condition and
+// status.type. The reasons are InvalidName, ReservedName, InvalidSpec and MissingSecret.
 func (r *OmpActionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	var act ompv1alpha1.OmpAction
+	if err := r.Get(ctx, req.NamespacedName, &act); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if !act.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+	if r.Options != nil && !r.Options.NamespaceAllowed(act.Namespace) {
+		return ctrl.Result{}, nil
+	}
 
-	// TODO(user): your logic here
+	typ, _ := actions.Type(&act.Spec)
+	status, reason, message, err := r.evaluate(ctx, &act)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.writeStatus(ctx, req.NamespacedName, typ, status, reason, message); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	return ctrl.Result{RequeueAfter: actionRecheckInterval}, nil
+}
 
-	return ctrl.Result{}, nil
+// evaluate returns the Ready condition of an action. err is set only for failures that say
+// nothing about the action (a Secret read failing for a reason other than not-found).
+func (r *OmpActionReconciler) evaluate(ctx context.Context, act *ompv1alpha1.OmpAction) (metav1.ConditionStatus, string, string, error) {
+	if reason, ok := actions.ValidateName(act.Name); !ok {
+		if reason == actions.ReasonInvalidName {
+			return metav1.ConditionFalse, reason, fmt.Sprintf("name %q must match ^[a-z][a-z0-9-]{0,62}$", act.Name), nil
+		}
+		return metav1.ConditionFalse, reason, fmt.Sprintf("tool name %q is reserved by omp or the operator", actions.ToolName(act.Name)), nil
+	}
+	if err := actions.ValidateSpec(&act.Spec); err != nil {
+		return metav1.ConditionFalse, actions.ReasonInvalidSpec, err.Error(), nil
+	}
+	refs := secretRefs(&act.Spec)
+	for _, ref := range refs {
+		var sec corev1.Secret
+		err := r.Get(ctx, client.ObjectKey{Namespace: act.Namespace, Name: ref.Name}, &sec)
+		switch {
+		case apierrors.IsNotFound(err):
+			return metav1.ConditionFalse, actions.ReasonMissingSecret, fmt.Sprintf("secret %q not found", ref.Name), nil
+		case err != nil:
+			return "", "", "", err
+		}
+		if _, ok := sec.Data[ref.Key]; !ok {
+			return metav1.ConditionFalse, actions.ReasonMissingSecret, fmt.Sprintf("secret %q has no key %q", ref.Name, ref.Key), nil
+		}
+	}
+	return metav1.ConditionTrue, "Ready", "action is ready", nil
+}
+
+// secretRefs lists the Secret keys an action reads at run time.
+func secretRefs(s *ompv1alpha1.OmpActionSpec) []ompv1alpha1.SecretKeyRef {
+	var refs []ompv1alpha1.SecretKeyRef
+	if s.AlertmanagerSilence != nil && s.AlertmanagerSilence.AuthSecretRef != nil {
+		refs = append(refs, *s.AlertmanagerSilence.AuthSecretRef)
+	}
+	if s.HTTPRequest != nil {
+		for _, h := range s.HTTPRequest.Headers {
+			if h.SecretRef != nil {
+				refs = append(refs, *h.SecretRef)
+			}
+		}
+	}
+	return refs
+}
+
+// writeStatus reads the action fresh and patches status.type and the Ready condition.
+func (r *OmpActionReconciler) writeStatus(ctx context.Context, key client.ObjectKey, typ ompv1alpha1.ActionType, status metav1.ConditionStatus, reason, message string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var cur ompv1alpha1.OmpAction
+		if err := r.Get(ctx, key, &cur); err != nil {
+			return err
+		}
+		base := cur.DeepCopy()
+		cur.Status.Type = typ
+		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+			Type:               ompv1alpha1.ConditionReady,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: cur.Generation,
+		})
+		if equalStatus(&base.Status, &cur.Status) {
+			return nil
+		}
+		return r.Status().Patch(ctx, &cur, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
+func equalStatus(a, b *ompv1alpha1.OmpActionStatus) bool {
+	if a.Type != b.Type || len(a.Conditions) != len(b.Conditions) {
+		return false
+	}
+	for i := range a.Conditions {
+		if a.Conditions[i] != b.Conditions[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // SetupWithManager sets up the controller with the Manager.

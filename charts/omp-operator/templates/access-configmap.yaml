@@ -1,0 +1,27 @@
+{{- $access := dict "rules" (.Values.dashboard.access | default list) -}}
+{{- with .Values.dashboard.oidc }}
+{{- if .issuerURL }}
+{{- $_ := required "dashboard.oidc.clientSecret.existingSecret is required when dashboard.oidc.issuerURL is set" .clientSecret.existingSecret -}}
+{{- $_ := set $access "oidc" (dict
+      "issuerURL" .issuerURL
+      "clientID" (required "dashboard.oidc.clientID is required when dashboard.oidc.issuerURL is set" .clientID)
+      "clientSecretFile" "/etc/omp-operator/oidc/client-secret"
+      "redirectURL" (printf "%s/auth/callback" (required "dashboard.url is required when dashboard.oidc.issuerURL is set" $.Values.dashboard.url | trimSuffix "/"))
+      "scopes" .scopes
+      "usernameClaim" .usernameClaim
+      "groupsClaim" .groupsClaim) -}}
+{{- end }}
+{{- end }}
+{{- if .Values.dashboard.basic.existingSecret }}
+{{- $_ := set $access "basic" (dict "htpasswdFile" "/etc/omp-operator/basic/htpasswd") -}}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: omp-operator-access
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "omp-operator.labels" . | nindent 4 }}
+data:
+  access.yaml: |
+    {{- toYaml $access | nindent 4 }}

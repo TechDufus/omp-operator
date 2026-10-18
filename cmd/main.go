@@ -14,31 +14,56 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Command manager runs the omp-operator: the reconcilers, the dashboard, the hooks server and
+// the agent API.
 package main
 
 import (
-	"crypto/tls"
+	"context"
+	"errors"
 	"flag"
+	"fmt"
+	"net"
+	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	ompv1alpha1 "github.com/TechDufus/omp-operator/api/v1alpha1"
+	"github.com/TechDufus/omp-operator/internal/actions"
+	"github.com/TechDufus/omp-operator/internal/agentapi"
+	"github.com/TechDufus/omp-operator/internal/celx"
+	"github.com/TechDufus/omp-operator/internal/config"
 	"github.com/TechDufus/omp-operator/internal/controller"
-	// +kubebuilder:scaffold:imports
+	"github.com/TechDufus/omp-operator/internal/dashboard"
+	"github.com/TechDufus/omp-operator/internal/gateway"
+	"github.com/TechDufus/omp-operator/internal/hooks"
+	"github.com/TechDufus/omp-operator/internal/metrics"
+	"github.com/TechDufus/omp-operator/internal/notify"
+	"github.com/TechDufus/omp-operator/internal/store"
 )
+
+// version is set at build time with -ldflags "-X main.version=<tag>".
+var version = "dev"
 
 var (
 	scheme   = runtime.NewScheme()
@@ -47,183 +72,265 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-
+	utilruntime.Must(sourcev1.AddToScheme(scheme))
 	utilruntime.Must(ompv1alpha1.AddToScheme(scheme))
-	// +kubebuilder:scaffold:scheme
 }
 
-// nolint:gocyclo
+type flags struct {
+	metricsAddr, probeAddr, webAddr, hooksAddr, agentAPIAddr string
+	secureMetrics                                            bool
+	serviceName, dataDir, defaultRuntimeImage                string
+	dashboardURL, hooksPublicURL, gatewayClientsSecret       string
+	agentNamespaces, actionTargetNamespaces, accessConfig    string
+}
+
 func main() {
-	var metricsAddr string
-	var metricsCertPath, metricsCertName, metricsCertKey string
-	var webhookCertPath, webhookCertName, webhookCertKey string
-	var webhookPort int
-	var enableLeaderElection bool
-	var probeAddr string
-	var secureMetrics bool
-	var enableHTTP2 bool
-	var tlsOpts []func(*tls.Config)
-	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
-		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
-		"Enable leader election for controller manager. "+
-			"Enabling this will ensure there is only one active controller manager.")
-	flag.BoolVar(&secureMetrics, "metrics-secure", true,
-		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
-	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
-	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
-	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
-	flag.IntVar(&webhookPort, "webhook-port", 9443, "Port the webhook server listens on. "+
-		"Defaults to 9443. Set -1 to disable the webhook server.")
-	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
-		"The directory that contains the metrics server certificate.")
-	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
-	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
-	flag.BoolVar(&enableHTTP2, "enable-http2", false,
-		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	opts := zap.Options{
-		Development: true,
-	}
-	opts.BindFlags(flag.CommandLine)
+	var f flags
+	flag.StringVar(&f.metricsAddr, "metrics-bind-address", ":9090", "Metrics endpoint address; 0 disables it.")
+	flag.BoolVar(&f.secureMetrics, "metrics-secure", false, "Serve metrics over HTTPS with authn/authz.")
+	flag.StringVar(&f.probeAddr, "health-probe-bind-address", ":8081", "Address the probe endpoint binds to.")
+	flag.StringVar(&f.webAddr, "web-bind-address", ":8080", "Address the dashboard binds to.")
+	flag.StringVar(&f.hooksAddr, "hooks-bind-address", ":8082", "Address the webhook receiver binds to.")
+	flag.StringVar(&f.agentAPIAddr, "agent-api-bind-address", ":8083", "Address the session/toolsync API binds to.")
+	flag.StringVar(&f.serviceName, "service-name", "omp-operator", "Service through which pods reach the agent API.")
+	flag.StringVar(&f.dataDir, "data-dir", "/data", "Directory for session files, continuity and toolchains.")
+	flag.StringVar(&f.defaultRuntimeImage, "default-runtime-image", "", "Image used when an agent sets no image.")
+	flag.StringVar(&f.dashboardURL, "dashboard-url", "", "External dashboard URL, for notification links.")
+	flag.StringVar(&f.hooksPublicURL, "hooks-public-url", "", "External hooks URL shown in the dashboard.")
+	flag.StringVar(&f.gatewayClientsSecret, "gateway-clients-secret", "",
+		"Gateway clients Secret; enables managed gateway tokens.")
+	flag.StringVar(&f.agentNamespaces, "agent-namespaces", "", "Comma list of namespaces served; empty means all.")
+	flag.StringVar(&f.actionTargetNamespaces, "action-target-namespaces", "",
+		"Comma list (or *) of namespaces actions may target besides their own.")
+	flag.StringVar(&f.accessConfig, "access-config", "/etc/omp-operator/access.yaml", "Dashboard access file.")
+	zapOpts := zap.Options{}
+	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-
-	// if the enable-http2 flag is false (the default), http/2 should be disabled
-	// due to its vulnerabilities. More specifically, disabling http/2 will
-	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
-	// Rapid Reset CVEs. For more information see:
-	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
-	// - https://github.com/advisories/GHSA-4374-p667-p6c8
-	disableHTTP2 := func(c *tls.Config) {
-		setupLog.Info("Disabling HTTP/2")
-		c.NextProtos = []string{"http/1.1"}
+	if err := run(f); err != nil {
+		setupLog.Error(err, "operator failed")
+		os.Exit(1)
 	}
+}
 
-	if !enableHTTP2 {
-		tlsOpts = append(tlsOpts, disableHTTP2)
+func run(f flags) error {
+	operatorNamespace := os.Getenv("POD_NAMESPACE")
+	if operatorNamespace == "" {
+		return errors.New("POD_NAMESPACE must be set")
 	}
-
-	// Initial webhook TLS options
-	webhookTLSOpts := tlsOpts
-	webhookServerOptions := webhook.Options{
-		TLSOpts: webhookTLSOpts,
-		Port:    webhookPort,
+	apiPort, err := portOf(f.agentAPIAddr)
+	if err != nil {
+		return fmt.Errorf("--agent-api-bind-address: %w", err)
 	}
-
-	if len(webhookCertPath) > 0 {
-		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
-			"webhook-cert-path", webhookCertPath, "webhook-cert-name", webhookCertName, "webhook-cert-key", webhookCertKey)
-
-		webhookServerOptions.CertDir = webhookCertPath
-		webhookServerOptions.CertName = webhookCertName
-		webhookServerOptions.KeyName = webhookCertKey
+	opts := &config.Options{
+		OperatorNamespace:      operatorNamespace,
+		ServiceName:            f.serviceName,
+		AgentAPIPort:           apiPort,
+		DataDir:                f.dataDir,
+		DefaultRuntimeImage:    f.defaultRuntimeImage,
+		DashboardURL:           f.dashboardURL,
+		HooksPublicURL:         f.hooksPublicURL,
+		GatewayClientsSecret:   f.gatewayClientsSecret,
+		AgentNamespaces:        config.SplitList(f.agentNamespaces),
+		ActionTargetNamespaces: config.SplitList(f.actionTargetNamespaces),
 	}
+	metrics.SetBuildInfo(version)
 
-	webhookServer := webhook.NewServer(webhookServerOptions)
-
-	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
-	// More info:
-	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/metrics/server
-	// - https://book.kubebuilder.io/reference/metrics.html
-	metricsServerOptions := metricsserver.Options{
-		BindAddress:   metricsAddr,
-		SecureServing: secureMetrics,
-		TLSOpts:       tlsOpts,
+	st, err := store.New(opts.DataDir)
+	if err != nil {
+		return fmt.Errorf("data dir: %w", err)
 	}
-
-	if secureMetrics {
-		// FilterProvider is used to protect the metrics endpoint with authn/authz.
-		// These configurations ensure that only authorized users and service accounts
-		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
-		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/metrics/filters#WithAuthenticationAndAuthorization
-		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
-	}
-
-	// If the certificate is not specified, controller-runtime will automatically
-	// generate self-signed certificates for the metrics server. While convenient for development and testing,
-	// this setup is not recommended for production.
-	//
-	// TODO(user): If you enable certManager, uncomment the following lines:
-	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
-	// managed by cert-manager for the metrics server.
-	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
-	if len(metricsCertPath) > 0 {
-		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
-			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
-
-		metricsServerOptions.CertDir = metricsCertPath
-		metricsServerOptions.CertName = metricsCertName
-		metricsServerOptions.KeyName = metricsCertKey
+	access, err := dashboard.LoadAccess(f.accessConfig)
+	if err != nil {
+		return fmt.Errorf("access config: %w", err)
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "1ef5e89d.techdufus.com",
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
+		Metrics:                metricsserver.Options{BindAddress: f.metricsAddr, SecureServing: f.secureMetrics},
+		HealthProbeBindAddress: f.probeAddr,
+		Cache:                  cacheOptions(opts),
+		Client: client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{
+			&corev1.Secret{}, &corev1.ConfigMap{},
+			&appsv1.Deployment{}, &appsv1.StatefulSet{}, &appsv1.DaemonSet{},
+		}}},
 	})
 	if err != nil {
-		setupLog.Error(err, "Failed to start manager")
-		os.Exit(1)
+		return fmt.Errorf("manager: %w", err)
 	}
+	c, apiReader := mgr.GetClient(), mgr.GetAPIReader()
 
+	celCache := celx.NewCache()
+	dispatcher := &notify.Dispatcher{Client: c, APIReader: apiReader, Sender: notify.NewSender(), Options: opts}
+	var gw *gateway.Manager
+	if opts.GatewayManaged() {
+		gw = &gateway.Manager{Client: c, APIReader: apiReader, Options: opts}
+	}
+	runner := &actions.Runner{Client: c, APIReader: apiReader, Store: st, Options: opts}
+
+	if err := (&controller.OmpActionReconciler{Client: c, Scheme: mgr.GetScheme(), Options: opts}).
+		SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("ompaction controller: %w", err)
+	}
 	if err := (&controller.OmpAgentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client: c, Scheme: mgr.GetScheme(), APIReader: apiReader, Options: opts, Store: st, Gateway: gw,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "ompagent")
-		os.Exit(1)
+		return fmt.Errorf("ompagent controller: %w", err)
 	}
 	if err := (&controller.OmpTriggerReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client: c, Scheme: mgr.GetScheme(), APIReader: apiReader, Options: opts, CEL: celCache,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "omptrigger")
-		os.Exit(1)
+		return fmt.Errorf("omptrigger controller: %w", err)
 	}
-	if err := (&controller.OmpSessionReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "ompsession")
-		os.Exit(1)
+	sessions := &controller.OmpSessionReconciler{
+		Client: c, Scheme: mgr.GetScheme(), APIReader: apiReader, Options: opts, Store: st, Notifier: dispatcher,
 	}
-	if err := (&controller.OmpActionReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "ompaction")
-		os.Exit(1)
+	if gw != nil {
+		sessions.Gateway = gw
 	}
-	// +kubebuilder:scaffold:builder
+	if err := sessions.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("ompsession controller: %w", err)
+	}
+
+	if gw != nil {
+		if err := mgr.Add(nonLeader(func(ctx context.Context) error {
+			if err := gw.EnsureClientsSecret(ctx); err != nil {
+				return fmt.Errorf("gateway clients secret: %w", err)
+			}
+			<-ctx.Done()
+			return nil
+		})); err != nil {
+			return err
+		}
+	}
+	if err := mgr.Add(nonLeader(func(ctx context.Context) error { return statfsLoop(ctx, st) })); err != nil {
+		return err
+	}
+
+	hooksHandler := &hooks.Handler{Client: c, APIReader: apiReader, Options: opts, CEL: celCache, Notify: dispatcher}
+	hooksMux := http.NewServeMux()
+	hooksMux.Handle(hooks.PathPrefix, hooksHandler)
+	apiServer := &agentapi.Server{Client: c, APIReader: apiReader, Store: st, Options: opts, Runner: runner}
+
+	servers := []struct {
+		name, addr string
+		handler    func(ctx context.Context) (http.Handler, error)
+		after      func()
+	}{
+		{name: "dashboard", addr: f.webAddr, handler: func(ctx context.Context) (http.Handler, error) {
+			key, err := dashboard.EnsureSessionKey(ctx, c, apiReader, operatorNamespace)
+			if err != nil {
+				return nil, fmt.Errorf("dashboard session key: %w", err)
+			}
+			return (&dashboard.Server{
+				Client: c, APIReader: apiReader, Store: st, Options: opts, Access: access, Key: key,
+			}).Handler(), nil
+		}},
+		{name: "hooks", addr: f.hooksAddr, handler: func(context.Context) (http.Handler, error) {
+			return hooksMux, nil
+		}, after: hooksHandler.Wait},
+		{name: "agent-api", addr: f.agentAPIAddr, handler: func(context.Context) (http.Handler, error) {
+			return apiServer.Handler(), nil
+		}},
+	}
+	for _, s := range servers {
+		if err := mgr.Add(nonLeader(func(ctx context.Context) error {
+			h, err := s.handler(ctx)
+			if err != nil {
+				return err
+			}
+			err = serve(ctx, s.name, s.addr, h)
+			if s.after != nil {
+				s.after()
+			}
+			return err
+		})); err != nil {
+			return err
+		}
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "Failed to set up health check")
-		os.Exit(1)
+		return err
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "Failed to set up ready check")
-		os.Exit(1)
+		return err
 	}
 
-	setupLog.Info("Starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		setupLog.Error(err, "Failed to run manager")
-		os.Exit(1)
+	setupLog.Info("starting manager", "version", version, "namespace", operatorNamespace)
+	return mgr.Start(ctrl.SetupSignalHandler())
+}
+
+// cacheOptions caches only operator-managed pods, and only in the served namespaces.
+func cacheOptions(opts *config.Options) cache.Options {
+	podCfg := cache.ByObject{
+		Label: labels.SelectorFromSet(labels.Set{ompv1alpha1.LabelManagedBy: ompv1alpha1.ManagedByValue}),
 	}
+	if len(opts.AgentNamespaces) > 0 {
+		podCfg.Namespaces = map[string]cache.Config{}
+		for _, ns := range opts.AgentNamespaces {
+			podCfg.Namespaces[ns] = cache.Config{}
+		}
+	}
+	return cache.Options{ByObject: map[client.Object]cache.ByObject{&corev1.Pod{}: podCfg}}
+}
+
+// nonLeader wraps fn as a runnable that runs without leader election, after the caches sync.
+func nonLeader(fn func(ctx context.Context) error) manager.Runnable {
+	return runnable{fn: fn}
+}
+
+type runnable struct {
+	fn func(ctx context.Context) error
+}
+
+func (r runnable) Start(ctx context.Context) error { return r.fn(ctx) }
+func (runnable) NeedLeaderElection() bool          { return false }
+
+// serve runs an HTTP server until ctx ends, then shuts it down gracefully.
+func serve(ctx context.Context, name, addr string, h http.Handler) error {
+	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	errc := make(chan error, 1)
+	go func() {
+		setupLog.Info("serving", "server", name, "addr", addr)
+		errc <- srv.ListenAndServe()
+	}()
+	select {
+	case err := <-errc:
+		return fmt.Errorf("%s server: %w", name, err)
+	case <-ctx.Done():
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("%s server shutdown: %w", name, err)
+	}
+	return nil
+}
+
+// statfsLoop publishes the data volume's free and total bytes every minute.
+func statfsLoop(ctx context.Context, st *store.Store) error {
+	tick := time.NewTicker(time.Minute)
+	defer tick.Stop()
+	for {
+		if free, capacity, err := st.Statfs(); err != nil {
+			setupLog.Error(err, "statfs of data dir failed")
+		} else {
+			metrics.DataFreeBytes.Set(float64(free))
+			metrics.DataCapacityBytes.Set(float64(capacity))
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+		}
+	}
+}
+
+func portOf(addr string) (int, error) {
+	_, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(p)
 }

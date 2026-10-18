@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omp-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "omp-operator.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "omp-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "omp-operator.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/access: {{ include (print $.Template.BasePath "/access-configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: omp-operator
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: {{ include "omp-operator.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --metrics-bind-address=:9090
+            - --metrics-secure=false
+            - --health-probe-bind-address=:8081
+            - --web-bind-address=:8080
+            - --hooks-bind-address=:8082
+            - --agent-api-bind-address=:8083
+            - --service-name=omp-operator
+            - --data-dir=/data
+            - --default-runtime-image={{ include "omp-operator.runtimeImage" . }}
+            - --dashboard-url={{ .Values.dashboard.url }}
+            - --hooks-public-url={{ .Values.hooks.publicURL }}
+            - --access-config=/etc/omp-operator/access.yaml
+            {{- with .Values.rbac.agentNamespaces }}
+            - --agent-namespaces={{ join "," . }}
+            {{- end }}
+            {{- with .Values.actions.targetNamespaces }}
+            - --action-target-namespaces={{ join "," . }}
+            {{- end }}
+            {{- if .Values.authGateway.enabled }}
+            - --gateway-clients-secret={{ .Values.authGateway.clientsSecret }}
+            {{- end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - {name: web, containerPort: 8080}
+            - {name: health, containerPort: 8081}
+            - {name: hooks, containerPort: 8082}
+            - {name: agent, containerPort: 8083}
+            - {name: metrics, containerPort: 9090}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: access
+              mountPath: /etc/omp-operator/access.yaml
+              subPath: access.yaml
+              readOnly: true
+            {{- if .Values.dashboard.oidc.clientSecret.existingSecret }}
+            - name: oidc-client-secret
+              mountPath: /etc/omp-operator/oidc
+              readOnly: true
+            {{- end }}
+            {{- if .Values.dashboard.basic.existingSecret }}
+            - name: basic-htpasswd
+              mountPath: /etc/omp-operator/basic
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: omp-operator-data
+        - name: tmp
+          emptyDir: {}
+        - name: access
+          configMap:
+            name: omp-operator-access
+        {{- with .Values.dashboard.oidc.clientSecret }}
+        {{- if .existingSecret }}
+        - name: oidc-client-secret
+          secret:
+            secretName: {{ .existingSecret }}
+            items:
+              - key: {{ .key }}
+                path: client-secret
+        {{- end }}
+        {{- end }}
+        {{- if .Values.dashboard.basic.existingSecret }}
+        - name: basic-htpasswd
+          secret:
+            secretName: {{ .Values.dashboard.basic.existingSecret }}
+            items:
+              - key: htpasswd
+                path: htpasswd
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

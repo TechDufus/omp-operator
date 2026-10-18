@@ -48,6 +48,10 @@ linters:
           - dupl
           - lll
         path: internal/*
+      - linters:
+          - goconst
+          - dupl
+        path: _test\.go
     paths:
       - third_party$
       - builtin$

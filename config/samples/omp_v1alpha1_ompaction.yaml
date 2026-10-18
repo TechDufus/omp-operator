@@ -3,7 +3,20 @@ kind: OmpAction
 metadata:
   labels:
     app.kubernetes.io/name: omp-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: ompaction-sample
+  name: restart-workload
 spec:
-  # TODO(user): Add fields here
+  description: >-
+    Rolling-restart a Deployment, StatefulSet or DaemonSet. Use it only when the logs show the
+    workload is wedged and a restart is the proven fix. A target can be restarted once per cooldown.
+  maxPerSession: 2
+  kubernetesRolloutRestart:
+    kinds:
+      - Deployment
+      - StatefulSet
+    namespaces:
+      # Defaults to this action's own namespace. Other namespaces additionally need the operator's
+      # --action-target-namespaces flag (chart value actions.targetNamespaces).
+      allow:
+        - default
+    cooldown: 6h
+    waitTimeout: 5m

@@ -1,0 +1,31 @@
+omp-operator {{ .Chart.AppVersion }} installed in namespace {{ .Release.Namespace }}.
+
+Dashboard (read-only, port 8080):
+{{- if .Values.dashboard.url }}
+  {{ .Values.dashboard.url }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/omp-operator 8080:8080
+  then open http://localhost:8080
+{{- end }}
+{{- if and (not .Values.dashboard.oidc.issuerURL) (not .Values.dashboard.basic.existingSecret) }}
+
+  No dashboard sign-in method is configured, so every dashboard page answers 503.
+  Set dashboard.oidc.* or dashboard.basic.existingSecret, plus dashboard.access rules.
+{{- else if not .Values.dashboard.access }}
+
+  No dashboard.access rules are set, so every signed-in user sees nothing.
+{{- end }}
+
+Webhooks (port 8082) are served at /hooks/<namespace>/<trigger>{{ if .Values.hooks.publicURL }}, for example {{ .Values.hooks.publicURL }}/hooks/<namespace>/<trigger>{{ end }}.
+Expose Service omp-operator port 8082 with your own Ingress or Gateway; this chart creates none.
+{{- if .Values.authGateway.enabled }}
+
+Model gateway: http://omp-auth.{{ .Release.Namespace }}.svc:4000 (use it as spec.model.gateway.url of an OmpAgent).
+Log the gateway in once; the broker stores the login on the omp-auth-data volume:
+  kubectl -n {{ .Release.Namespace }} port-forward deploy/omp-auth 54545:54545 &
+  kubectl -n {{ .Release.Namespace }} exec -it deploy/omp-auth -c gateway -- omp auth-broker login anthropic
+  kubectl -n {{ .Release.Namespace }} rollout restart deploy/omp-auth
+For a ChatGPT subscription use provider openai-codex and forward port 1455 instead of 54545.
+{{- end }}
+
+Agents run in {{ if .Values.rbac.agentNamespaces }}{{ join ", " .Values.rbac.agentNamespaces }}{{ else }}any namespace{{ end }}. Samples: https://github.com/TechDufus/omp-operator/tree/main/config/samples

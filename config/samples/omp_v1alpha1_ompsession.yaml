@@ -3,7 +3,10 @@ kind: OmpSession
 metadata:
   labels:
     app.kubernetes.io/name: omp-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: ompsession-sample
+  name: hello
 spec:
-  # TODO(user): Add fields here
+  agentRef:
+    name: alert-triage
+  prompt: |
+    Report whether $DEMO_TOKEN is set (yes or no only) and list the skills you can read.
+    Then call finish with verdict ok.

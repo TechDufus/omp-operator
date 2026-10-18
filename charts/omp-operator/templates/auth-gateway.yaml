@@ -1,0 +1,141 @@
+{{- if .Values.authGateway.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: omp-auth-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "omp-operator.authLabels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.authGateway.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.authGateway.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omp-auth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "omp-operator.authLabels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "omp-operator.authSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: gateway
+      port: 4000
+      targetPort: gateway
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omp-auth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "omp-operator.authLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "omp-operator.authSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "omp-operator.authSelectorLabels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Native sidecar: the credential broker. The gateway container starts once its
+        # startupProbe sees the broker's bearer token on the shared /data volume.
+        - name: broker
+          image: {{ include "omp-operator.runtimeImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          restartPolicy: Always
+          command: [omp]
+          args: [auth-broker, serve, --bind=127.0.0.1:8765]
+          env:
+            - name: HOME
+              value: /data
+          startupProbe:
+            exec:
+              command: [sh, -c, "find /data -name auth-broker.token -size +0 | grep -q ."]
+            periodSeconds: 2
+            failureThreshold: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: gateway
+          image: {{ include "omp-operator.runtimeImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [omp]
+          args: [auth-gateway, serve, --bind=0.0.0.0:4000, --clients=/etc/omp-auth/clients.json]
+          env:
+            - name: HOME
+              value: /data
+            - name: OMP_AUTH_BROKER_URL
+              value: http://127.0.0.1:8765
+          ports:
+            - name: gateway
+              containerPort: 4000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: gateway
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: clients
+              mountPath: /etc/omp-auth
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: omp-auth-data
+        - name: tmp
+          emptyDir: {}
+        - name: clients
+          secret:
+            secretName: {{ .Values.authGateway.clientsSecret }}
+            optional: false
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

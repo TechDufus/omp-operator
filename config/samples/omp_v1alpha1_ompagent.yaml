@@ -3,7 +3,45 @@ kind: OmpAgent
 metadata:
   labels:
     app.kubernetes.io/name: omp-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: ompagent-sample
+  name: alert-triage
 spec:
-  # TODO(user): Add fields here
+  model:
+    default: anthropic/claude-sonnet-5-5
+    thinking: medium
+    gateway:
+      # The chart's omp-auth Service (authGateway.enabled=true), reached from the agent's namespace.
+      # With no tokenSecretRef the operator issues and tracks a token for this agent.
+      url: http://omp-auth.omp-system.svc:4000
+  instructions: |
+    You triage alerts for this cluster. Investigate with the credentials and tools you have, then
+    call finish with a verdict: ok (nothing to do), fixed (you remediated it with an action),
+    needs_owner (a human must act) or inconclusive.
+  tools:
+    allow: [read, grep, glob, bash, todo]
+  skills:
+    - configMap:
+        name: triage-skills
+  credentials:
+    - name: demo
+      description: Example credential, replace with a real read-only API token
+      secretRef:
+        name: triage-credentials
+        key: demo
+      env: DEMO_TOKEN
+  actions:
+    - name: restart-workload
+  limits:
+    sessionTimeout: 30m
+    maxAttempts: 4
+    retryDelay: 15m
+    eventSessionsPerDay: 12
+    nonCriticalSessionsPerDay: 8
+  notify:
+    - type: ntfy
+      "on": [fixed, needs_owner, failed]
+      ntfy:
+        url: https://ntfy.sh
+        topicSecretRef:
+          name: triage-notify
+          key: ntfy-topic
+  sessionRetention: 720h

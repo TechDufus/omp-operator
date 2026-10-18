@@ -1,5 +1,64 @@
 image:
   repository: ghcr.io/techdufus/omp-operator
-  tag: ""
+  tag: "" # "" = the chart's appVersion
   digest: ""
   pullPolicy: IfNotPresent
+
+# Also the default agent image (--default-runtime-image) and the image of the omp-auth gateway.
+runtimeImage:
+  repository: ghcr.io/techdufus/omp-operator-runtime
+  tag: "" # "" = the chart's appVersion
+  digest: ""
+
+dashboard:
+  url: ""
+  oidc:
+    issuerURL: ""
+    clientID: ""
+    clientSecret:
+      existingSecret: ""
+      key: client-secret
+    scopes: [openid, email, profile, groups]
+    usernameClaim: email
+    groupsClaim: groups
+  basic:
+    existingSecret: "" # Secret with key "htpasswd" (bcrypt entries only)
+  # Access rules, rendered into the access file as-is:
+  #   - users: ["alice@example.com", "basic:ops"]
+  #     groups: ["platform"]
+  #     namespaces: ["*"]
+  #     role: viewer
+  access: []
+
+hooks:
+  publicURL: ""
+
+actions:
+  # ["*"] lets actions target any namespace except the operator's.
+  targetNamespaces: []
+
+persistence:
+  storageClass: ""
+  size: 20Gi
+
+authGateway:
+  enabled: false
+  clientsSecret: omp-auth-clients
+  persistence:
+    storageClass: ""
+    size: 1Gi
+
+rbac:
+  # Namespaces the operator may manage agents in; empty means cluster-wide.
+  agentNamespaces: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []

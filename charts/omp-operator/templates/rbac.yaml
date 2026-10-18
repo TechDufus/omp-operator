@@ -1,0 +1,56 @@
+{{- /* Rules R (pods, secrets, configmaps) are namespaced when rbac.agentNamespaces is set, cluster-wide otherwise. */ -}}
+{{- if .Values.rbac.agentNamespaces }}
+{{- range $ns := (append .Values.rbac.agentNamespaces .Release.Namespace | uniq) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "omp-operator.accessRoleName" $ }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "omp-operator.labels" $ | nindent 4 }}
+rules:
+  {{- include "omp-operator.namespacedRules" $ | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "omp-operator.accessRoleName" $ }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "omp-operator.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "omp-operator.accessRoleName" $ }}
+subjects:
+  - kind: ServiceAccount
+    name: omp-operator
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- else }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "omp-operator.accessRoleName" . }}
+  labels:
+    {{- include "omp-operator.labels" . | nindent 4 }}
+rules:
+  {{- include "omp-operator.namespacedRules" . | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "omp-operator.accessRoleName" . }}
+  labels:
+    {{- include "omp-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "omp-operator.accessRoleName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: omp-operator
+    namespace: {{ .Release.Namespace }}
+{{- end }}

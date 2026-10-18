@@ -15,8 +15,9 @@ limitations under the License.
 */
 
 // Package notify delivers session results and operator notices to ntfy, Slack,
-// Discord and generic webhook sinks. It holds no Kubernetes client: callers
-// resolve Secret values and pass them to the sink constructors.
+// Discord and generic webhook sinks. The sinks and Sender hold no Kubernetes
+// client: they take resolved Secret values. Dispatcher resolves an OmpAgent's
+// notify sinks from the cluster and drives them.
 package notify
 
 import (
