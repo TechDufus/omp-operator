@@ -36,6 +36,11 @@ type OmpActionReconciler struct {
 // +kubebuilder:rbac:groups=omp.techdufus.com,resources=ompactions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=omp.techdufus.com,resources=ompactions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=omp.techdufus.com,resources=ompactions/finalizers,verbs=update
+// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories;helmrepositories,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;patch
+// +kubebuilder:rbac:groups=helm.toolkit.fluxcd.io,resources=helmreleases,verbs=get;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets;daemonsets,verbs=get;patch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.

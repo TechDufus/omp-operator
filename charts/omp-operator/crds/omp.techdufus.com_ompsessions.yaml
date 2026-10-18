@@ -11,10 +11,31 @@ spec:
     kind: OmpSession
     listKind: OmpSessionList
     plural: ompsessions
+    shortNames:
+      - ompsession
     singular: ompsession
   scope: Namespaced
   versions:
-    - name: v1alpha1
+    - additionalPrinterColumns:
+        - jsonPath: .spec.agentRef.name
+          name: Agent
+          type: string
+        - jsonPath: .spec.triggerRef.name
+          name: Trigger
+          type: string
+        - jsonPath: .status.phase
+          name: Phase
+          type: string
+        - jsonPath: .status.verdict
+          name: Verdict
+          type: string
+        - jsonPath: .status.title
+          name: Title
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1alpha1
       schema:
         openAPIV3Schema:
           description: OmpSession is the Schema for the ompsessions API
@@ -39,24 +60,101 @@ spec:
             spec:
               description: spec defines the desired state of OmpSession
               properties:
-                foo:
-                  description: foo is an example field of OmpSession. Edit ompsession_types.go to remove/update
+                agentRef:
+                  description: agentRef is the OmpAgent that runs the session.
+                  properties:
+                    name:
+                      description: name is the object name.
+                      minLength: 1
+                      type: string
+                  required:
+                    - name
+                  type: object
+                continuityKey:
+                  description: continuityKey makes sessions of one agent with the same key share omp history.
                   type: string
+                event:
+                  description: event describes the webhook event that created the session.
+                  properties:
+                    groupId:
+                      description: groupId is the trigger group id.
+                      type: string
+                    key:
+                      description: key is the event's grouping key.
+                      type: string
+                    name:
+                      description: name is the event name.
+                      type: string
+                    severity:
+                      description: severity is the event severity.
+                      type: string
+                  type: object
+                priority:
+                  description: priority orders pending sessions of one agent, lower first. Empty means 1 (manual).
+                  format: int32
+                  maximum: 3
+                  minimum: 0
+                  type: integer
+                prompt:
+                  description: prompt is the text sent to omp.
+                  minLength: 1
+                  type: string
+                triggerRef:
+                  description: triggerRef is the OmpTrigger that created the session, if any.
+                  properties:
+                    name:
+                      description: name is the object name.
+                      minLength: 1
+                      type: string
+                  required:
+                    - name
+                  type: object
+              required:
+                - agentRef
+                - prompt
               type: object
             status:
               description: status defines the observed state of OmpSession
               properties:
+                actions:
+                  description: actions records the action calls the agent made.
+                  items:
+                    description: ActionRecord is one action call made by the agent.
+                    properties:
+                      action:
+                        description: action is the action's tool name.
+                        type: string
+                      at:
+                        description: at is when the call was made.
+                        format: date-time
+                        type: string
+                      ok:
+                        description: ok is whether the call succeeded.
+                        type: boolean
+                      result:
+                        description: result is the text returned to the agent.
+                        maxLength: 300
+                        type: string
+                      target:
+                        description: target describes what the call acted on.
+                        type: string
+                    required:
+                      - action
+                      - at
+                      - ok
+                    type: object
+                  maxItems: 20
+                  type: array
+                attempts:
+                  description: attempts is the pods started so far.
+                  format: int32
+                  type: integer
+                completionTime:
+                  description: completionTime is when the session reached a terminal phase.
+                  format: date-time
+                  type: string
                 conditions:
-                  description: |-
-                    conditions represent the current state of the OmpSession resource.
-                    Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                    Standard condition types include:
-                    - "Available": the resource is fully functional
-                    - "Progressing": the resource is being created or updated
-                    - "Degraded": the resource failed to reach or maintain its desired state
-
-                    The status of each condition is one of True, False, or Unknown.
+                  description: conditions are Notified and WorkspaceReady.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:
@@ -114,6 +212,96 @@ spec:
                   x-kubernetes-list-map-keys:
                     - type
                   x-kubernetes-list-type: map
+                continuity:
+                  description: continuity reports whether omp history was restored and stored.
+                  properties:
+                    restored:
+                      description: restored is whether stored history was loaded.
+                      type: boolean
+                    stored:
+                      description: stored is whether history was saved.
+                      type: boolean
+                  type: object
+                error:
+                  description: error describes why the session failed.
+                  maxLength: 1000
+                  type: string
+                outcome:
+                  description: outcome is how the latest attempt ended.
+                  enum:
+                    - completed
+                    - retryable
+                    - auth
+                    - error
+                  type: string
+                phase:
+                  description: phase is the lifecycle phase.
+                  enum:
+                    - Pending
+                    - Running
+                    - Succeeded
+                    - Failed
+                  type: string
+                podName:
+                  description: podName is the current or last pod.
+                  type: string
+                proposedCommands:
+                  description: proposedCommands are commands the agent suggests an owner run.
+                  items:
+                    maxLength: 500
+                    type: string
+                  maxItems: 10
+                  type: array
+                retryAt:
+                  description: retryAt is when a retryable attempt may run again.
+                  format: date-time
+                  type: string
+                startTime:
+                  description: startTime is when the first attempt started.
+                  format: date-time
+                  type: string
+                summary:
+                  description: summary is the agent's summary.
+                  maxLength: 3000
+                  type: string
+                title:
+                  description: title is the agent's one-line title.
+                  maxLength: 80
+                  type: string
+                usage:
+                  description: usage is the token and cost accounting.
+                  properties:
+                    cacheReadTokens:
+                      description: cacheReadTokens is the cache-read tokens used.
+                      format: int64
+                      type: integer
+                    cacheWriteTokens:
+                      description: cacheWriteTokens is the cache-write tokens used.
+                      format: int64
+                      type: integer
+                    cost:
+                      description: cost is the cost as a decimal string.
+                      type: string
+                    inputTokens:
+                      description: inputTokens is the input tokens used.
+                      format: int64
+                      type: integer
+                    outputTokens:
+                      description: outputTokens is the output tokens used.
+                      format: int64
+                      type: integer
+                  type: object
+                verdict:
+                  description: verdict is the agent's reported result.
+                  enum:
+                    - ok
+                    - fixed
+                    - needs_owner
+                    - inconclusive
+                  type: string
+                workspaceRevision:
+                  description: workspaceRevision is the revision the workspace was prepared from.
+                  type: string
               type: object
           required:
             - spec

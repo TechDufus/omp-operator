@@ -11,10 +11,25 @@ spec:
     kind: OmpTrigger
     listKind: OmpTriggerList
     plural: omptriggers
+    shortNames:
+      - omptrigger
     singular: omptrigger
   scope: Namespaced
   versions:
-    - name: v1alpha1
+    - additionalPrinterColumns:
+        - jsonPath: .spec.agentRef.name
+          name: Agent
+          type: string
+        - jsonPath: .status.type
+          name: Type
+          type: string
+        - jsonPath: .status.conditions[?(@.type=="Ready")].status
+          name: Ready
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1alpha1
       schema:
         openAPIV3Schema:
           description: OmpTrigger is the Schema for the omptriggers API
@@ -39,24 +54,221 @@ spec:
             spec:
               description: spec defines the desired state of OmpTrigger
               properties:
-                foo:
-                  description: foo is an example field of OmpTrigger. Edit omptrigger_types.go to remove/update
+                agentRef:
+                  description: agentRef is the OmpAgent that runs the sessions.
+                  properties:
+                    name:
+                      description: name is the object name.
+                      minLength: 1
+                      type: string
+                  required:
+                    - name
+                  type: object
+                enabled:
+                  default: true
+                  description: enabled turns the trigger on or off.
+                  type: boolean
+                priority:
+                  description: |-
+                    priority orders pending sessions of one agent, lower first. Empty means
+                    webhook 2 (1 when severity is critical) and schedule 3.
+                  format: int32
+                  maximum: 3
+                  minimum: 0
+                  type: integer
+                prompt:
+                  description: prompt is a Go text/template (missingkey=error) rendered into the session prompt.
+                  minLength: 1
                   type: string
+                schedule:
+                  description: schedule makes the trigger fire on a cron schedule.
+                  properties:
+                    cron:
+                      description: cron is a 5-field cron expression.
+                      minLength: 1
+                      type: string
+                    input:
+                      description: input is available to the prompt template as .Input.
+                      type: string
+                    timeZone:
+                      default: UTC
+                      description: timeZone is an IANA time zone name.
+                      type: string
+                  required:
+                    - cron
+                  type: object
+                session:
+                  default: {}
+                  description: session configures the sessions this trigger creates.
+                  properties:
+                    resume:
+                      default: none
+                      description: resume selects how sessions share omp history; "episode" only applies to webhook triggers.
+                      enum:
+                        - none
+                        - episode
+                        - key
+                      type: string
+                  type: object
+                webhook:
+                  description: webhook makes the trigger fire on HTTP requests.
+                  properties:
+                    adapter:
+                      description: adapter turns the payload into events.
+                      enum:
+                        - alertmanager
+                        - grafana
+                        - generic
+                      type: string
+                    alertFilter:
+                      description: |-
+                        alertFilter is a CEL expression over `alert` returning bool (alert adapters only).
+                        Empty means everything except Watchdog and InfoInhibitor.
+                      type: string
+                    auth:
+                      description: auth authenticates requests.
+                      properties:
+                        basic:
+                          description: basic checks HTTP basic credentials.
+                          properties:
+                            secretRef:
+                              description: secretRef is a Secret with keys "username" and "password".
+                              properties:
+                                name:
+                                  description: name is the object name.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - name
+                              type: object
+                          required:
+                            - secretRef
+                          type: object
+                        bearer:
+                          description: 'bearer checks an Authorization: Bearer token.'
+                          properties:
+                            secretRef:
+                              description: secretRef holds the token.
+                              properties:
+                                key:
+                                  description: key is the key inside the Secret.
+                                  minLength: 1
+                                  type: string
+                                name:
+                                  description: name is the Secret name.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - key
+                                - name
+                              type: object
+                          required:
+                            - secretRef
+                          type: object
+                        hmac:
+                          description: hmac checks a hex SHA-256 signature of the body.
+                          properties:
+                            header:
+                              default: X-Hub-Signature-256
+                              description: header carries the hex signature.
+                              type: string
+                            maxSkew:
+                              default: 5m
+                              description: maxSkew is the allowed distance of the timestamp from now.
+                              type: string
+                            prefix:
+                              description: |-
+                                prefix precedes the signature in the header. Unset means "sha256=" for
+                                X-Hub-Signature-256 and "" for any other header.
+                              type: string
+                            secretRef:
+                              description: secretRef holds the shared key.
+                              properties:
+                                key:
+                                  description: key is the key inside the Secret.
+                                  minLength: 1
+                                  type: string
+                                name:
+                                  description: name is the Secret name.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - key
+                                - name
+                              type: object
+                            timestampHeader:
+                              description: timestampHeader carries Unix seconds; when set the signed text is "<timestamp>:<body>".
+                              type: string
+                          required:
+                            - secretRef
+                          type: object
+                      type: object
+                      x-kubernetes-validations:
+                        - message: exactly one of bearer, basic or hmac must be set
+                          rule: '[has(self.bearer), has(self.basic), has(self.hmac)].exists_one(x, x)'
+                    filter:
+                      description: filter is a CEL expression over `event` returning bool. Empty means true.
+                      type: string
+                    grouping:
+                      default: {}
+                      description: grouping controls how events are grouped, deduplicated and rate limited.
+                      properties:
+                        episodeGap:
+                          default: 30m
+                          description: episodeGap is how long a resolved group stays quiet before a new episode starts.
+                          type: string
+                        perGroupPerDay:
+                          default: 2
+                          description: perGroupPerDay caps sessions per group in a rolling 24 hours.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        retriageAfter:
+                          default: 1h
+                          description: retriageAfter is the minimum gap between sessions for new fingerprints of one group.
+                          type: string
+                      type: object
+                    mapping:
+                      description: mapping turns a generic payload into events; required for the generic adapter.
+                      properties:
+                        events:
+                          description: events returns the list of events in the payload. Empty means "[payload]".
+                          type: string
+                        fingerprint:
+                          description: fingerprint returns the event fingerprint (string). Empty means the sha256 of the event's JSON.
+                          type: string
+                        key:
+                          description: key returns the event's grouping key (string).
+                          minLength: 1
+                          type: string
+                        severity:
+                          description: severity returns the event severity (string). Empty means "'info'".
+                          type: string
+                        status:
+                          description: status returns "firing" or "resolved". Empty means "'firing'".
+                          type: string
+                        title:
+                          description: title returns the event name (string). Empty means "''".
+                          type: string
+                      required:
+                        - key
+                      type: object
+                  required:
+                    - adapter
+                    - auth
+                  type: object
+              required:
+                - agentRef
+                - prompt
               type: object
+              x-kubernetes-validations:
+                - message: exactly one of webhook or schedule must be set
+                  rule: '[has(self.webhook), has(self.schedule)].exists_one(x, x)'
             status:
               description: status defines the observed state of OmpTrigger
               properties:
                 conditions:
-                  description: |-
-                    conditions represent the current state of the OmpTrigger resource.
-                    Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                    Standard condition types include:
-                    - "Available": the resource is fully functional
-                    - "Progressing": the resource is being created or updated
-                    - "Degraded": the resource failed to reach or maintain its desired state
-
-                    The status of each condition is one of True, False, or Unknown.
+                  description: conditions holds Ready.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:
@@ -114,6 +326,68 @@ spec:
                   x-kubernetes-list-map-keys:
                     - type
                   x-kubernetes-list-type: map
+                groups:
+                  description: groups is the state of recent event groups.
+                  items:
+                    description: TriggerGroup is the dedupe and rate-limit state of one event group.
+                    properties:
+                      episodeStart:
+                        description: episodeStart is when the current episode began.
+                        format: date-time
+                        type: string
+                      id:
+                        description: id is the first 16 hex characters of the sha256 of the event key.
+                        minLength: 1
+                        type: string
+                      lastNotified:
+                        description: lastNotified is when the group last received a firing event.
+                        format: date-time
+                        type: string
+                      lastSession:
+                        description: lastSession is the name of the latest session created for the group.
+                        type: string
+                      lastSessionAt:
+                        description: lastSessionAt is when that session was created.
+                        format: date-time
+                        type: string
+                      name:
+                        description: name is the latest event name.
+                        type: string
+                      resolvedAt:
+                        description: resolvedAt is when the group was last resolved; unset while firing.
+                        format: date-time
+                        type: string
+                      severity:
+                        description: severity is the latest event severity.
+                        type: string
+                      triagedFingerprints:
+                        description: triagedFingerprints are the fingerprints already handed to a session, newest last.
+                        items:
+                          type: string
+                        maxItems: 50
+                        type: array
+                    required:
+                      - id
+                    type: object
+                  maxItems: 100
+                  type: array
+                hookPath:
+                  description: hookPath is the webhook path, /hooks/<namespace>/<name>.
+                  type: string
+                lastFireAt:
+                  description: lastFireAt is the schedule slot last fired.
+                  format: date-time
+                  type: string
+                nextFireAt:
+                  description: nextFireAt is the next schedule slot.
+                  format: date-time
+                  type: string
+                type:
+                  description: type is the trigger type that is set in the spec.
+                  enum:
+                    - webhook
+                    - schedule
+                  type: string
               type: object
           required:
             - spec

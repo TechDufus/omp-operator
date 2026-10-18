@@ -17,42 +17,152 @@ limitations under the License.
 package v1alpha1
 
 import (
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// OmpActionSpec defines the desired state of OmpAction
+// OmpActionSpec defines the desired state of OmpAction. Exactly one action
+// type is set. The object's name must match ^[a-z][a-z0-9-]{0,62}$ and not be
+// reserved; the reconciler enforces this and reports it through Ready.
+// +kubebuilder:validation:XValidation:rule="[has(self.kubernetesRolloutRestart), has(self.fluxReconcile), has(self.alertmanagerSilence), has(self.httpRequest)].exists_one(x, x)",message="exactly one of kubernetesRolloutRestart, fluxReconcile, alertmanagerSilence or httpRequest must be set"
 type OmpActionSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+	// description is the tool description the model sees.
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	Description string `json:"description"`
 
-	// foo is an example field of OmpAction. Edit ompaction_types.go to remove/update
+	// maxPerSession is the calls one session may make.
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	MaxPerSession int32 `json:"maxPerSession,omitempty"`
+
+	// kubernetesRolloutRestart restarts a workload.
+	// +optional
+	KubernetesRolloutRestart *KubernetesRolloutRestartAction `json:"kubernetesRolloutRestart,omitempty"`
+
+	// fluxReconcile asks Flux to reconcile an object.
+	// +optional
+	FluxReconcile *FluxReconcileAction `json:"fluxReconcile,omitempty"`
+
+	// alertmanagerSilence creates an Alertmanager silence.
+	// +optional
+	AlertmanagerSilence *AlertmanagerSilenceAction `json:"alertmanagerSilence,omitempty"`
+
+	// httpRequest sends an HTTP request to a fixed URL prefix.
+	// +optional
+	HTTPRequest *HTTPRequestAction `json:"httpRequest,omitempty"`
+}
+
+// KubernetesRolloutRestartAction restarts a Deployment, StatefulSet or DaemonSet.
+type KubernetesRolloutRestartAction struct {
+	// kinds are the workload kinds that may be restarted.
+	// +kubebuilder:default={"Deployment"}
+	// +optional
+	Kinds []WorkloadKind `json:"kinds,omitempty"`
+
+	// namespaces limits the target namespaces.
+	// +kubebuilder:default={}
+	// +optional
+	Namespaces NamespaceRule `json:"namespaces,omitzero"`
+
+	// cooldown is the minimum time between successful restarts of one target.
+	// +kubebuilder:default="6h"
+	// +optional
+	Cooldown metav1.Duration `json:"cooldown,omitzero"`
+
+	// waitTimeout is how long to wait for the rollout to complete.
+	// +kubebuilder:default="5m"
+	// +optional
+	WaitTimeout metav1.Duration `json:"waitTimeout,omitzero"`
+}
+
+// FluxReconcileAction triggers a Flux reconciliation.
+type FluxReconcileAction struct {
+	// kinds are the Flux kinds that may be reconciled.
+	// +kubebuilder:default={"Kustomization","HelmRelease","GitRepository","OCIRepository"}
+	// +optional
+	Kinds []FluxKind `json:"kinds,omitempty"`
+
+	// namespaces limits the target namespaces.
+	// +kubebuilder:default={}
+	// +optional
+	Namespaces NamespaceRule `json:"namespaces,omitzero"`
+
+	// waitTimeout is how long to wait for the reconcile to be handled.
+	// +kubebuilder:default="5m"
+	// +optional
+	WaitTimeout metav1.Duration `json:"waitTimeout,omitzero"`
+}
+
+// AlertmanagerSilenceAction creates silences in an Alertmanager.
+type AlertmanagerSilenceAction struct {
+	// url is the Alertmanager base URL (absolute http or https).
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	URL string `json:"url"`
+
+	// authSecretRef is an optional bearer token.
+	// +optional
+	AuthSecretRef *SecretKeyRef `json:"authSecretRef,omitempty"`
+
+	// maxDuration is the longest silence the agent may create.
+	// +kubebuilder:default="24h"
+	// +optional
+	MaxDuration metav1.Duration `json:"maxDuration,omitzero"`
+
+	// protectedAlertnames can never be silenced.
+	// +kubebuilder:default={"Watchdog","InfoInhibitor"}
+	// +optional
+	ProtectedAlertnames []string `json:"protectedAlertnames,omitempty"`
+}
+
+// HTTPRequestAction sends an HTTP request to a URL under allowedURLPrefix.
+type HTTPRequestAction struct {
+	// method is the HTTP method.
+	// +required
+	Method HTTPMethod `json:"method"`
+
+	// url is a Go template over .Args.
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	URL string `json:"url"`
+
+	// allowedURLPrefix is the absolute http(s) URL (no userinfo, query or fragment) the rendered URL must stay under.
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	AllowedURLPrefix string `json:"allowedURLPrefix"`
+
+	// headers are sent with every request.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	Headers []ValueOrSecret `json:"headers,omitempty"`
+
+	// body is a Go template over .Args with the funcs json and urlquery.
+	// +optional
+	Body string `json:"body,omitempty"`
+
+	// parameters is a JSON Schema (type object) validating the agent's arguments.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	// +required
+	Parameters apiextensionsv1.JSON `json:"parameters"`
+
+	// responseMaxBytes truncates the response returned to the agent.
+	// +kubebuilder:default=65536
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	ResponseMaxBytes int32 `json:"responseMaxBytes,omitempty"`
 }
 
 // OmpActionStatus defines the observed state of OmpAction.
 type OmpActionStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// type is the action type that is set in the spec.
+	// +optional
+	Type ActionType `json:"type,omitempty"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the OmpAction resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// conditions holds Ready.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -61,6 +171,10 @@ type OmpActionStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=ompaction
+// +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.status.type`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // OmpAction is the Schema for the ompactions API
 type OmpAction struct {

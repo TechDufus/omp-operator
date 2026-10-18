@@ -1,4 +1,34 @@
 - apiGroups:
+    - ""
+  resources:
+    - events
+  verbs:
+    - create
+    - patch
+- apiGroups:
+    - apps
+  resources:
+    - daemonsets
+    - deployments
+    - statefulsets
+  verbs:
+    - get
+    - patch
+- apiGroups:
+    - helm.toolkit.fluxcd.io
+  resources:
+    - helmreleases
+  verbs:
+    - get
+    - patch
+- apiGroups:
+    - kustomize.toolkit.fluxcd.io
+  resources:
+    - kustomizations
+  verbs:
+    - get
+    - patch
+- apiGroups:
     - omp.techdufus.com
   resources:
     - ompactions
@@ -33,3 +63,14 @@
     - get
     - patch
     - update
+- apiGroups:
+    - source.toolkit.fluxcd.io
+  resources:
+    - gitrepositories
+    - helmrepositories
+    - ocirepositories
+  verbs:
+    - get
+    - list
+    - patch
+    - watch

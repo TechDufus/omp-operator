@@ -1,0 +1,58 @@
+{
+  "version": "4",
+  "groupKey": "{}/{team=\"core\"}:{alertname=\"HighCPU\", namespace=\"prod\"}",
+  "truncatedAlerts": 0,
+  "status": "firing",
+  "receiver": "omp",
+  "groupLabels": {"alertname": "HighCPU", "namespace": "prod"},
+  "commonLabels": {"team": "core", "namespace": "prod"},
+  "commonAnnotations": {},
+  "externalURL": "http://alertmanager:9093",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {"alertname": "HighCPU", "namespace": "prod", "team": "core", "severity": "warning", "pod": "api-1"},
+      "annotations": {"summary": "CPU is high"},
+      "startsAt": "2026-10-18T10:00:00.000Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus/graph?g0.expr=up",
+      "fingerprint": "aaaa111122223333"
+    },
+    {
+      "status": "firing",
+      "labels": {"alertname": "HighCPU", "namespace": "prod", "team": "core", "severity": "critical", "pod": "api-2"},
+      "annotations": {"summary": "CPU is very high"},
+      "startsAt": "2026-10-18T10:01:00.000Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus/graph?g0.expr=up",
+      "fingerprint": "bbbb111122223333"
+    },
+    {
+      "status": "resolved",
+      "labels": {"alertname": "HighCPU", "namespace": "prod", "team": "core", "severity": "error", "pod": "api-3"},
+      "annotations": {},
+      "startsAt": "2026-10-18T09:00:00.000Z",
+      "endsAt": "2026-10-18T09:30:00.000Z",
+      "generatorURL": "http://prometheus/graph?g0.expr=up",
+      "fingerprint": "cccc111122223333"
+    },
+    {
+      "status": "firing",
+      "labels": {"alertname": "Watchdog", "severity": "none"},
+      "annotations": {},
+      "startsAt": "2026-10-17T00:00:00.000Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus/graph?g0.expr=vector(1)",
+      "fingerprint": "dddd111122223333"
+    },
+    {
+      "status": "firing",
+      "labels": {"alertname": "HighCPU", "namespace": "prod", "team": "core", "severity": "warning", "pod": "api-1"},
+      "annotations": {},
+      "startsAt": "2026-10-18T10:00:30.000Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus/graph?g0.expr=up",
+      "fingerprint": "aaaa111122223333"
+    }
+  ]
+}

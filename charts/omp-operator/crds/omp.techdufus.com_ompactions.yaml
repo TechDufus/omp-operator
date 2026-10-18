@@ -11,10 +11,22 @@ spec:
     kind: OmpAction
     listKind: OmpActionList
     plural: ompactions
+    shortNames:
+      - ompaction
     singular: ompaction
   scope: Namespaced
   versions:
-    - name: v1alpha1
+    - additionalPrinterColumns:
+        - jsonPath: .status.type
+          name: Type
+          type: string
+        - jsonPath: .status.conditions[?(@.type=="Ready")].status
+          name: Ready
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1alpha1
       schema:
         openAPIV3Schema:
           description: OmpAction is the Schema for the ompactions API
@@ -39,24 +51,217 @@ spec:
             spec:
               description: spec defines the desired state of OmpAction
               properties:
-                foo:
-                  description: foo is an example field of OmpAction. Edit ompaction_types.go to remove/update
+                alertmanagerSilence:
+                  description: alertmanagerSilence creates an Alertmanager silence.
+                  properties:
+                    authSecretRef:
+                      description: authSecretRef is an optional bearer token.
+                      properties:
+                        key:
+                          description: key is the key inside the Secret.
+                          minLength: 1
+                          type: string
+                        name:
+                          description: name is the Secret name.
+                          minLength: 1
+                          type: string
+                      required:
+                        - key
+                        - name
+                      type: object
+                    maxDuration:
+                      default: 24h
+                      description: maxDuration is the longest silence the agent may create.
+                      type: string
+                    protectedAlertnames:
+                      default:
+                        - Watchdog
+                        - InfoInhibitor
+                      description: protectedAlertnames can never be silenced.
+                      items:
+                        type: string
+                      type: array
+                    url:
+                      description: url is the Alertmanager base URL (absolute http or https).
+                      minLength: 1
+                      type: string
+                  required:
+                    - url
+                  type: object
+                description:
+                  description: description is the tool description the model sees.
+                  minLength: 1
                   type: string
+                fluxReconcile:
+                  description: fluxReconcile asks Flux to reconcile an object.
+                  properties:
+                    kinds:
+                      default:
+                        - Kustomization
+                        - HelmRelease
+                        - GitRepository
+                        - OCIRepository
+                      description: kinds are the Flux kinds that may be reconciled.
+                      items:
+                        description: FluxKind is a Flux object a reconcile action may target.
+                        enum:
+                          - Kustomization
+                          - HelmRelease
+                          - GitRepository
+                          - OCIRepository
+                          - HelmRepository
+                        type: string
+                      type: array
+                    namespaces:
+                      default: {}
+                      description: namespaces limits the target namespaces.
+                      properties:
+                        allow:
+                          description: allow lists permitted target namespaces; "*" permits any. Empty means the action's own namespace.
+                          items:
+                            type: string
+                          type: array
+                        deny:
+                          description: deny lists namespaces that are never permitted.
+                          items:
+                            type: string
+                          type: array
+                      type: object
+                    waitTimeout:
+                      default: 5m
+                      description: waitTimeout is how long to wait for the reconcile to be handled.
+                      type: string
+                  type: object
+                httpRequest:
+                  description: httpRequest sends an HTTP request to a fixed URL prefix.
+                  properties:
+                    allowedURLPrefix:
+                      description: allowedURLPrefix is the absolute http(s) URL (no userinfo, query or fragment) the rendered URL must stay under.
+                      minLength: 1
+                      type: string
+                    body:
+                      description: body is a Go template over .Args with the funcs json and urlquery.
+                      type: string
+                    headers:
+                      description: headers are sent with every request.
+                      items:
+                        description: ValueOrSecret is a named value that is either literal or read from a Secret key.
+                        properties:
+                          name:
+                            description: name is the environment variable or header name.
+                            minLength: 1
+                            type: string
+                          secretRef:
+                            description: secretRef reads the value from a Secret key.
+                            properties:
+                              key:
+                                description: key is the key inside the Secret.
+                                minLength: 1
+                                type: string
+                              name:
+                                description: name is the Secret name.
+                                minLength: 1
+                                type: string
+                            required:
+                              - key
+                              - name
+                            type: object
+                          value:
+                            description: value is a literal value.
+                            type: string
+                        required:
+                          - name
+                        type: object
+                        x-kubernetes-validations:
+                          - message: exactly one of value or secretRef must be set
+                            rule: '[has(self.value), has(self.secretRef)].exists_one(x, x)'
+                      maxItems: 32
+                      type: array
+                    method:
+                      description: method is the HTTP method.
+                      enum:
+                        - GET
+                        - POST
+                        - PUT
+                        - PATCH
+                        - DELETE
+                      type: string
+                    parameters:
+                      description: parameters is a JSON Schema (type object) validating the agent's arguments.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    responseMaxBytes:
+                      default: 65536
+                      description: responseMaxBytes truncates the response returned to the agent.
+                      format: int32
+                      minimum: 1
+                      type: integer
+                    url:
+                      description: url is a Go template over .Args.
+                      minLength: 1
+                      type: string
+                  required:
+                    - allowedURLPrefix
+                    - method
+                    - parameters
+                    - url
+                  type: object
+                kubernetesRolloutRestart:
+                  description: kubernetesRolloutRestart restarts a workload.
+                  properties:
+                    cooldown:
+                      default: 6h
+                      description: cooldown is the minimum time between successful restarts of one target.
+                      type: string
+                    kinds:
+                      default:
+                        - Deployment
+                      description: kinds are the workload kinds that may be restarted.
+                      items:
+                        description: WorkloadKind is a workload a rollout-restart action may restart.
+                        enum:
+                          - Deployment
+                          - StatefulSet
+                          - DaemonSet
+                        type: string
+                      type: array
+                    namespaces:
+                      default: {}
+                      description: namespaces limits the target namespaces.
+                      properties:
+                        allow:
+                          description: allow lists permitted target namespaces; "*" permits any. Empty means the action's own namespace.
+                          items:
+                            type: string
+                          type: array
+                        deny:
+                          description: deny lists namespaces that are never permitted.
+                          items:
+                            type: string
+                          type: array
+                      type: object
+                    waitTimeout:
+                      default: 5m
+                      description: waitTimeout is how long to wait for the rollout to complete.
+                      type: string
+                  type: object
+                maxPerSession:
+                  default: 3
+                  description: maxPerSession is the calls one session may make.
+                  format: int32
+                  minimum: 1
+                  type: integer
+              required:
+                - description
               type: object
+              x-kubernetes-validations:
+                - message: exactly one of kubernetesRolloutRestart, fluxReconcile, alertmanagerSilence or httpRequest must be set
+                  rule: '[has(self.kubernetesRolloutRestart), has(self.fluxReconcile), has(self.alertmanagerSilence), has(self.httpRequest)].exists_one(x, x)'
             status:
               description: status defines the observed state of OmpAction
               properties:
                 conditions:
-                  description: |-
-                    conditions represent the current state of the OmpAction resource.
-                    Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                    Standard condition types include:
-                    - "Available": the resource is fully functional
-                    - "Progressing": the resource is being created or updated
-                    - "Degraded": the resource failed to reach or maintain its desired state
-
-                    The status of each condition is one of True, False, or Unknown.
+                  description: conditions holds Ready.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:
@@ -114,6 +319,14 @@ spec:
                   x-kubernetes-list-map-keys:
                     - type
                   x-kubernetes-list-type: map
+                type:
+                  description: type is the action type that is set in the spec.
+                  enum:
+                    - kubernetesRolloutRestart
+                    - fluxReconcile
+                    - alertmanagerSilence
+                    - httpRequest
+                  type: string
               type: object
           required:
             - spec
