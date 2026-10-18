@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -260,10 +261,7 @@ func classify(turn omprpc.PromptTurn, err error, deadline time.Time, interrupted
 		if perr == nil {
 			return agentapi.OutcomeError, "prompt failed"
 		}
-		status := int64(0)
-		if perr.HTTPStatus != nil {
-			status = *perr.HTTPStatus
-		}
+		status := errorStatus(perr)
 		switch {
 		case status == http.StatusUnauthorized || status == http.StatusForbidden:
 			return agentapi.OutcomeAuth, perr.Message
@@ -275,6 +273,25 @@ func classify(turn omprpc.PromptTurn, err error, deadline time.Time, interrupted
 	default:
 		return agentapi.OutcomeCompleted, ""
 	}
+}
+
+// gatewayStatus matches the prefix omp puts on a pi-native failure whose auth-gateway answer is
+// not a JSON error object (the gateway answers {"error": "<text>"}).
+var gatewayStatus = regexp.MustCompile(`^auth-gateway (\d{3})\b`)
+
+// errorStatus is the HTTP status of a failed prompt. omp reports httpStatus for direct provider
+// calls; for models routed through an auth-gateway (transport pi-native) it never does, and the
+// status survives only as the "auth-gateway <status>: ..." message prefix.
+func errorStatus(perr *omprpc.PromptError) int64 {
+	if perr.HTTPStatus != nil {
+		return *perr.HTTPStatus
+	}
+	if m := gatewayStatus.FindStringSubmatch(perr.Message); m != nil {
+		if status, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+			return status
+		}
+	}
+	return 0
 }
 
 // hostTools builds one omp host tool per action definition. Each call is forwarded to the

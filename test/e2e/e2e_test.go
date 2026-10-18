@@ -1,5 +1,4 @@
 //go:build e2e
-// +build e2e
 
 /*
 Copyright 2026 TechDufus.
@@ -20,320 +19,356 @@ limitations under the License.
 package e2e
 
 import (
-	"encoding/json"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"net/http"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"github.com/TechDufus/omp-operator/test/utils"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// namespace where the project is deployed in
-const namespace = "omp-operator-system"
+const (
+	bearerToken = "e2e-am-bearer-token"
+	hmacKey     = "e2e-gen-hmac-key"
+	echoHost    = "http://echo.e2e.svc:5678"
 
-// serviceAccountName created for the project
-const serviceAccountName = "omp-operator-controller-manager"
+	// alertPayload is an Alertmanager v4 payload; %s lists the alerts.
+	alertPayload = `{"version":"4","groupKey":"{}:{alertname=\"E2EHighLoad\"}","status":"firing","receiver":"omp",` +
+		`"groupLabels":{"alertname":"E2EHighLoad"},"commonLabels":{"alertname":"E2EHighLoad","severity":"warning"},` +
+		`"commonAnnotations":{},"externalURL":"http://alertmanager.example","alerts":[%s]}`
+	alertFiring = `{"status":"firing","labels":{"alertname":"E2EHighLoad","severity":"warning","instance":"%s"},` +
+		`"annotations":{"summary":"load is high on %[1]s"},"startsAt":"2026-10-18T10:00:00Z","fingerprint":"%[1]s"}`
+)
 
-// metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "omp-operator-controller-manager-metrics-service"
+func alert(fingerprint string) string { return fmt.Sprintf(alertFiring, fingerprint) }
 
-// metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
-const metricsRoleBindingName = "omp-operator-metrics-binding"
+var _ = Describe("omp-operator", Ordered, func() {
+	var hooks, web, metricsPF *portForward
+	var amFirst string // the first alertmanager session
 
-var _ = Describe("Manager", Ordered, func() {
-	var controllerPodName string
-
-	// Before running the tests, set up the environment by creating the namespace,
-	// enforce the restricted security policy to the namespace, installing CRDs,
-	// and deploying the controller.
 	BeforeAll(func() {
-		By("creating manager namespace")
-		cmd := exec.Command("kubectl", "create", "ns", namespace)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
+		By("creating the agent's Secrets, action, agent and triggers")
+		mustApply(secretYAML(agentNS, "fake-gateway", map[string]string{"token": "e2e-dummy-gateway-token"}))
+		mustApply(secretYAML(agentNS, "fake-notify", map[string]string{"url": echoHost + "/sink"}))
+		mustApply(secretYAML(agentNS, "am-bearer", map[string]string{"token": bearerToken}))
+		mustApply(secretYAML(agentNS, "gen-hmac", map[string]string{"key": hmacKey}))
+		mustApply(echoActionYAML)
+		mustApply(agentYAML)
+		mustApply(amTriggerYAML)
+		mustApply(genTriggerYAML)
 
-		By("labeling the namespace to enforce the restricted security policy")
-		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
-			"pod-security.kubernetes.io/enforce=restricted")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+		expectReady("ompactions", "echo")
+		expectReady("ompagents", "fake")
+		expectReady("omptriggers", "am")
+		expectReady("omptriggers", "gen")
+		Expect(str(get("omptriggers", "am"), "status", "hookPath")).To(Equal("/hooks/e2e/am"))
 
-		By("installing CRDs")
-		cmd = exec.Command("make", "install")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
-
-		By("deploying the controller-manager")
-		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+		hooks = startPortForward("omp-operator", 8082)
+		web = startPortForward("omp-operator", 8080)
+		metricsPF = startPortForward("omp-operator", 9090)
 	})
 
-	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
-	// and deleting the namespace.
-	AfterAll(func() {
-		By("cleaning up the curl pod for metrics")
-		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
-		_, _ = utils.Run(cmd)
+	It("runs a manual session to ok, calls the echo action and notifies the webhook sink", func() {
+		mustApply(manualSessionYAML)
+		s := waitSession("manual-1")
+		Expect(str(s, "status", "verdict")).To(Equal("ok"))
 
-		By("undeploying the controller-manager")
-		cmd = exec.Command("make", "undeploy")
-		_, _ = utils.Run(cmd)
+		actions, _, _ := unstructured.NestedSlice(s.Object, "status", "actions")
+		Expect(actions).NotTo(BeEmpty())
+		first, _ := actions[0].(map[string]any)
+		Expect(first["action"]).To(Equal("echo"))
+		Expect(first["ok"]).To(BeTrue())
 
-		By("uninstalling CRDs")
-		cmd = exec.Command("make", "uninstall")
-		_, _ = utils.Run(cmd)
-
-		By("removing manager namespace")
-		cmd = exec.Command("kubectl", "delete", "ns", namespace)
-		_, _ = utils.Run(cmd)
+		Eventually(func() string {
+			return conditionStatus(get("ompsessions", "manual-1"), "Notified")
+		}, time.Minute, 2*time.Second).Should(Equal("True"))
+		Eventually(func() string {
+			out, _ := run("kubectl", "-n", agentNS, "logs", "deployment/echo")
+			return out
+		}, time.Minute, 2*time.Second).Should(
+			And(ContainSubstring("POST"), ContainSubstring("/echo"), ContainSubstring("/sink")))
 	})
 
-	// After each test, check for failures and collect logs, events,
-	// and pod descriptions for debugging.
-	AfterEach(func() {
-		specReport := CurrentSpecReport()
-		if specReport.Failed() {
-			By("Fetching controller manager pod logs")
-			cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
-			controllerLogs, err := utils.Run(cmd)
-			if err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Controller logs:\n %s", controllerLogs)
-			} else {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Controller logs: %s", err)
-			}
+	It("creates one session from an alertmanager payload and dedupes the repeat", func() {
+		body := fmt.Sprintf(alertPayload, alert("fp-1"))
+		hdr := map[string]string{"Authorization": "Bearer " + bearerToken, "Content-Type": "application/json"}
 
-			By("Fetching Kubernetes events")
-			cmd = exec.Command("kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
-			eventsOutput, err := utils.Run(cmd)
-			if err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Kubernetes events:\n%s", eventsOutput)
-			} else {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Kubernetes events: %s", err)
-			}
+		code, resp, err := httpDo(http.MethodPost, hooks.Base+"/hooks/e2e/am", []byte(body), hdr)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(code).To(Equal(http.StatusAccepted), resp)
+		Eventually(func() []unstructured.Unstructured { return sessionsOf("am") }, 30*time.Second, time.Second).
+			Should(HaveLen(1))
 
-			By("Fetching curl-metrics logs")
-			cmd = exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
-			metricsOutput, err := utils.Run(cmd)
-			if err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Metrics logs:\n %s", metricsOutput)
-			} else {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get curl-metrics logs: %s", err)
-			}
+		code, resp, err = httpDo(http.MethodPost, hooks.Base+"/hooks/e2e/am", []byte(body), hdr)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(code).To(Equal(http.StatusNoContent), resp)
+		Consistently(func() []unstructured.Unstructured { return sessionsOf("am") }, 3*time.Second, time.Second).
+			Should(HaveLen(1))
 
-			By("Fetching controller manager pod description")
-			cmd = exec.Command("kubectl", "describe", "pod", controllerPodName, "-n", namespace)
-			podDescription, err := utils.Run(cmd)
-			if err == nil {
-				fmt.Println("Pod description:\n", podDescription)
-			} else {
-				fmt.Println("Failed to describe controller pod")
+		code, _, err = httpDo(http.MethodPost, hooks.Base+"/hooks/e2e/am", []byte(body), nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(code).To(Equal(http.StatusUnauthorized))
+
+		amFirst = sessionsOf("am")[0].GetName()
+		s := waitSession(amFirst)
+		Expect(str(s, "status", "verdict")).To(Equal("ok"))
+		Expect(s.GetLabels()["omp.techdufus.com/kind"]).To(Equal("webhook"))
+		restored, _, _ := unstructured.NestedBool(s.Object, "status", "continuity", "restored")
+		Expect(restored).To(BeFalse())
+		stored, _, _ := unstructured.NestedBool(s.Object, "status", "continuity", "stored")
+		Expect(stored).To(BeTrue(), "the first episode session must store its continuity")
+	})
+
+	It("restores continuity in a later session of the same episode", func() {
+		// retriageAfter is 1s and the first session ran for longer, so one new alert opens a session.
+		body := fmt.Sprintf(alertPayload, alert("fp-1")+","+alert("fp-2"))
+		hdr := map[string]string{"Authorization": "Bearer " + bearerToken, "Content-Type": "application/json"}
+		code, resp, err := httpDo(http.MethodPost, hooks.Base+"/hooks/e2e/am", []byte(body), hdr)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(code).To(Equal(http.StatusAccepted), resp)
+
+		Eventually(func() []unstructured.Unstructured { return sessionsOf("am") }, 30*time.Second, time.Second).
+			Should(HaveLen(2))
+		var second string
+		for _, s := range sessionsOf("am") {
+			if s.GetName() != amFirst {
+				second = s.GetName()
 			}
 		}
+		Expect(second).NotTo(BeEmpty())
+		s := waitSession(second)
+		restored, _, _ := unstructured.NestedBool(s.Object, "status", "continuity", "restored")
+		Expect(restored).To(BeTrue(), "session %s should have restored the episode's history", second)
 	})
 
-	SetDefaultEventuallyTimeout(2 * time.Minute)
-	SetDefaultEventuallyPollingInterval(time.Second)
+	It("accepts a correctly signed generic webhook and rejects a bad signature", func() {
+		body := []byte(`{"id":"gen-1","title":"generic e2e event"}`)
+		mac := hmac.New(sha256.New, []byte(hmacKey))
+		mac.Write(body)
+		sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 
-	Context("Manager", func() {
-		It("should run successfully", func() {
-			By("validating that the controller-manager pod is running as expected")
-			verifyControllerUp := func(g Gomega) {
-				By("getting the name of the controller-manager pod")
-				cmd := exec.Command("kubectl", "get",
-					"pods", "-l", "control-plane=controller-manager",
-					"-o", "go-template={{ range .items }}"+
-						"{{ if not .metadata.deletionTimestamp }}"+
-						"{{ .metadata.name }}"+
-						"{{ \"\\n\" }}{{ end }}{{ end }}",
-					"-n", namespace,
-				)
+		code, resp, err := httpDo(http.MethodPost, hooks.Base+"/hooks/e2e/gen", body,
+			map[string]string{"X-Hub-Signature-256": sig, "Content-Type": "application/json"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(code).To(Equal(http.StatusAccepted), resp)
 
-				podOutput, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve controller-manager pod information")
-				podNames := utils.GetNonEmptyLines(podOutput)
-				g.Expect(podNames).To(HaveLen(1), "expected 1 controller pod running")
-				controllerPodName = podNames[0]
-				g.Expect(controllerPodName).To(ContainSubstring("controller-manager"))
+		code, _, err = httpDo(http.MethodPost, hooks.Base+"/hooks/e2e/gen", body,
+			map[string]string{"X-Hub-Signature-256": "sha256=" + strings.Repeat("0", 64)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(code).To(Equal(http.StatusUnauthorized))
 
-				By("validating the pod's status")
-				cmd = exec.Command("kubectl", "get",
-					"pods", controllerPodName, "-o", "jsonpath={.status.phase}",
-					"-n", namespace,
-				)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Running"), "Incorrect controller-manager pod status")
+		Eventually(func() []unstructured.Unstructured { return sessionsOf("gen") }, 30*time.Second, time.Second).
+			Should(HaveLen(1))
+		s := waitSession(sessionsOf("gen")[0].GetName())
+		Expect(str(s, "status", "verdict")).To(Equal("ok"))
+	})
+
+	It("fires a schedule trigger within two minutes", func() {
+		mustApply(cronTriggerYAML)
+		expectReady("omptriggers", "cron")
+		Eventually(func() []unstructured.Unstructured { return sessionsOf("cron") }, 2*time.Minute, 2*time.Second).
+			ShouldNot(BeEmpty())
+		first := sessionsOf("cron")[0]
+		Expect(first.GetLabels()["omp.techdufus.com/kind"]).To(Equal("schedule"))
+		// Stop the schedule so it does not keep creating sessions during the remaining checks.
+		mustRun("kubectl", "-n", agentNS, "patch", "omptriggers.omp.techdufus.com", "cron",
+			"--type=merge", "-p", `{"spec":{"enabled":false}}`)
+		waitSession(first.GetName())
+	})
+
+	It("serves the dashboard behind basic auth", func() {
+		code, body, err := httpDo(http.MethodGet, web.Base+"/healthz", nil, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(code).To(Equal(http.StatusOK), body)
+
+		code, _, err = httpDo(http.MethodGet, web.Base+"/", nil, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(code).To(Equal(http.StatusUnauthorized))
+
+		creds := base64.StdEncoding.EncodeToString([]byte(dashUser + ":" + dashPass))
+		auth := map[string]string{"Authorization": "Basic " + creds}
+		code, body, err = httpDo(http.MethodGet, web.Base+"/", nil, auth)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(code).To(Equal(http.StatusOK), body)
+		Expect(body).To(ContainSubstring("manual-1"))
+
+		code, body, err = httpDo(http.MethodGet, web.Base+"/sessions/e2e/manual-1", nil, auth)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(code).To(Equal(http.StatusOK), body)
+		Expect(body).To(ContainSubstring("ok"))
+
+		code, _, err = httpDo(http.MethodGet, web.Base+"/sessions/e2e/manual-1/transcript", nil, auth)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(code).To(Equal(http.StatusOK))
+	})
+
+	It("exposes session metrics", func() {
+		Eventually(func() string {
+			_, body, err := httpDo(http.MethodGet, metricsPF.Base+"/metrics", nil, nil)
+			if err != nil {
+				return err.Error()
 			}
-			Eventually(verifyControllerUp).Should(Succeed())
-		})
-
-		It("should ensure the metrics endpoint is serving metrics", func() {
-			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
-			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
-				"--clusterrole=omp-operator-metrics-reader",
-				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
-			)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
-
-			By("validating that the metrics service is available")
-			cmd = exec.Command("kubectl", "get", "service", metricsServiceName, "-n", namespace)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Metrics service should exist")
-
-			By("getting the service account token")
-			token, err := serviceAccountToken()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(token).NotTo(BeEmpty())
-
-			By("ensuring the controller pod is ready")
-			verifyControllerPodReady := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "pod", controllerPodName, "-n", namespace,
-					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("True"), "Controller pod not ready")
+			var hits []string
+			for line := range strings.SplitSeq(body, "\n") {
+				if strings.HasPrefix(line, "omp_operator_sessions_total{") && strings.Contains(line, `verdict="ok"`) {
+					hits = append(hits, line)
+				}
 			}
-			Eventually(verifyControllerPodReady, 3*time.Minute, time.Second).Should(Succeed())
-
-			By("verifying that the controller manager is serving the metrics server")
-			verifyMetricsServerStarted := func(g Gomega) {
-				cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(ContainSubstring("Serving metrics server"),
-					"Metrics server not yet started")
-			}
-			Eventually(verifyMetricsServerStarted, 3*time.Minute, time.Second).Should(Succeed())
-
-			// +kubebuilder:scaffold:e2e-metrics-webhooks-readiness
-
-			By("creating the curl-metrics pod to access the metrics endpoint")
-			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
-				"--namespace", namespace,
-				"--image=curlimages/curl:latest",
-				"--overrides",
-				fmt.Sprintf(`{
-					"spec": {
-						"containers": [{
-							"name": "curl",
-							"image": "curlimages/curl:latest",
-							"command": ["/bin/sh", "-c"],
-							"args": [
-								"for i in $(seq 1 30); do curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics && exit 0 || sleep 2; done; exit 1"
-							],
-							"securityContext": {
-								"readOnlyRootFilesystem": true,
-								"allowPrivilegeEscalation": false,
-								"capabilities": {
-									"drop": ["ALL"]
-								},
-								"runAsNonRoot": true,
-								"runAsUser": 1000,
-								"seccompProfile": {
-									"type": "RuntimeDefault"
-								}
-							}
-						}],
-						"serviceAccountName": "%s"
-					}
-				}`, token, metricsServiceName, namespace, serviceAccountName))
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
-
-			By("waiting for the curl-metrics pod to complete.")
-			verifyCurlUp := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "pods", "curl-metrics",
-					"-o", "jsonpath={.status.phase}",
-					"-n", namespace)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Succeeded"), "curl pod in wrong status")
-			}
-			Eventually(verifyCurlUp, 5*time.Minute).Should(Succeed())
-
-			By("getting the metrics by checking curl-metrics logs")
-			verifyMetricsAvailable := func(g Gomega) {
-				metricsOutput, err := getMetricsOutput()
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-				g.Expect(metricsOutput).NotTo(BeEmpty())
-				g.Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
-			}
-			Eventually(verifyMetricsAvailable, 2*time.Minute).Should(Succeed())
-		})
-
-		// +kubebuilder:scaffold:e2e-webhooks-checks
-
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+			return strings.Join(hits, "\n")
+		}, time.Minute, 2*time.Second).ShouldNot(BeEmpty())
 	})
 })
 
-// serviceAccountToken returns a token for the specified service account in the given namespace.
-// It uses the Kubernetes TokenRequest API to generate a token by directly sending a request
-// and parsing the resulting token from the API response.
-func serviceAccountToken() (string, error) {
-	const tokenRequestRawString = `{
-		"apiVersion": "authentication.k8s.io/v1",
-		"kind": "TokenRequest"
-	}`
+const echoActionYAML = `apiVersion: omp.techdufus.com/v1alpha1
+kind: OmpAction
+metadata:
+  name: echo
+  namespace: e2e
+spec:
+  description: Send a message to the echo server.
+  httpRequest:
+    method: POST
+    url: ` + echoHost + `/echo
+    allowedURLPrefix: ` + echoHost + `/
+    body: '{{ json .Args }}'
+    parameters:
+      type: object
+      required: [msg]
+      additionalProperties: false
+      properties:
+        msg: {type: string}
+`
 
-	By("creating temporary file to store the token request")
-	secretName := fmt.Sprintf("%s-token-request", serviceAccountName)
-	tokenRequestFile := filepath.Join("/tmp", secretName)
-	err := os.WriteFile(tokenRequestFile, []byte(tokenRequestRawString), os.FileMode(0o644))
-	if err != nil {
-		return "", err
-	}
+// fakeompScript calls the echo action, then finishes ok.
+const fakeompScript = `{"calls":[{"tool":"echo","args":{"msg":"hello from fakeomp"}}],` +
+	`"finish":{"verdict":"ok","title":"e2e session","summary":"fakeomp finished","report":"fakeomp report"}}`
 
-	var out string
-	verifyTokenCreation := func(g Gomega) {
-		By("executing kubectl command to create the token")
-		cmd := exec.Command("kubectl", "create", "--raw", fmt.Sprintf(
-			"/api/v1/namespaces/%s/serviceaccounts/%s/token",
-			namespace,
-			serviceAccountName,
-		), "-f", tokenRequestFile)
+const agentYAML = `apiVersion: omp.techdufus.com/v1alpha1
+kind: OmpAgent
+metadata:
+  name: fake
+  namespace: e2e
+spec:
+  model:
+    default: fake/fake-model
+    gateway:
+      url: http://omp-auth.omp-system.svc:4000
+      tokenSecretRef: {name: fake-gateway, key: token}
+  actions:
+    - name: echo
+  notify:
+    - type: webhook
+      webhook:
+        urlSecretRef: {name: fake-notify, key: url}
+  pod:
+    env:
+      - name: FAKEOMP_SCRIPT
+        value: '` + fakeompScript + `'
+`
 
-		output, err := cmd.CombinedOutput()
-		g.Expect(err).NotTo(HaveOccurred())
+const amTriggerYAML = `apiVersion: omp.techdufus.com/v1alpha1
+kind: OmpTrigger
+metadata:
+  name: am
+  namespace: e2e
+spec:
+  agentRef: {name: fake}
+  session:
+    resume: episode
+  webhook:
+    adapter: alertmanager
+    auth:
+      bearer:
+        secretRef: {name: am-bearer, key: token}
+    grouping:
+      retriageAfter: 1s
+  prompt: |
+    Alert group {{ .Event.Name }} is {{ .Event.Status }} ({{ .Event.Severity }}); reason: {{ .Reason }}.
+    Previous: {{ .Previous }}
+    {{ .Alerts }}
+`
 
-		By("parsing the JSON output to extract the token")
-		var token tokenRequest
-		err = json.Unmarshal(output, &token)
-		g.Expect(err).NotTo(HaveOccurred())
+const genTriggerYAML = `apiVersion: omp.techdufus.com/v1alpha1
+kind: OmpTrigger
+metadata:
+  name: gen
+  namespace: e2e
+spec:
+  agentRef: {name: fake}
+  webhook:
+    adapter: generic
+    auth:
+      hmac:
+        secretRef: {name: gen-hmac, key: key}
+    mapping:
+      key: payload.id
+      title: payload.title
+  prompt: |
+    Event {{ .Event.Name }} ({{ .Event.Key }}).
+    {{ .Payload }}
+`
 
-		out = token.Status.Token
-	}
-	Eventually(verifyTokenCreation).Should(Succeed())
+const cronTriggerYAML = `apiVersion: omp.techdufus.com/v1alpha1
+kind: OmpTrigger
+metadata:
+  name: cron
+  namespace: e2e
+spec:
+  agentRef: {name: fake}
+  schedule:
+    cron: '* * * * *'
+  prompt: |
+    Scheduled run at {{ .Now }}. Input: {{ .Input }}
+`
 
-	return out, err
-}
+const manualSessionYAML = `apiVersion: omp.techdufus.com/v1alpha1
+kind: OmpSession
+metadata:
+  name: manual-1
+  namespace: e2e
+spec:
+  agentRef: {name: fake}
+  prompt: Say hello through the echo action, then call finish with verdict ok.
+`
 
-// getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
-func getMetricsOutput() (string, error) {
-	By("getting the curl-metrics logs")
-	cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
-	return utils.Run(cmd)
-}
-
-// tokenRequest is a simplified representation of the Kubernetes TokenRequest API response,
-// containing only the token field that we need to extract.
-type tokenRequest struct {
-	Status struct {
-		Token string `json:"token"`
-	} `json:"status"`
+func echoYAML(image string) string {
+	return `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo
+  namespace: e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: echo}
+  template:
+    metadata:
+      labels: {app: echo}
+    spec:
+      containers:
+        - name: echo
+          image: ` + image + `
+          args: ["-listen=:5678", "-text=ok"]
+          ports:
+            - containerPort: 5678
+          readinessProbe:
+            httpGet: {path: /, port: 5678}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo
+  namespace: e2e
+spec:
+  selector: {app: echo}
+  ports:
+    - port: 5678
+      targetPort: 5678
+`
 }

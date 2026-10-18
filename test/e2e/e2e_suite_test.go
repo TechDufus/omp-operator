@@ -1,5 +1,4 @@
 //go:build e2e
-// +build e2e
 
 /*
 Copyright 2026 TechDufus.
@@ -20,100 +19,145 @@ limitations under the License.
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"golang.org/x/crypto/bcrypt"
+)
 
-	"github.com/TechDufus/omp-operator/test/utils"
+const (
+	systemNS  = "omp-system" // the operator's namespace
+	agentNS   = "e2e"        // the only namespace the operator manages agents in
+	release   = "omp"
+	dashUser  = "e2e"
+	dashPass  = "e2e-dashboard-pass"
+	htpasswdS = "omp-dashboard-basic"
 )
 
 var (
-	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "example.com/omp-operator:v0.0.1"
-	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
-	shouldCleanupCertManager = false
+	// Images and cluster are chosen by `mise run test-e2e`; the defaults match its own.
+	operatorImage = envOr("IMG", "omp-operator:dev")
+	e2eImage      = envOr("E2E_IMG", "omp-operator-e2e:dev")
+	kindCluster   = envOr("KIND_CLUSTER", "omp-operator-e2e")
+
+	projectDir string
+	echoImage  string // hashicorp/http-echo pinned by digest
 )
 
-// TestE2E runs the e2e test suite to validate the solution in an isolated environment.
-// The default setup requires Kind and CertManager.
-//
-// To enable kubectl kuberc (use custom kubectl configurations), set: KUBECTL_KUBERC=true
-// By default, kuberc is disabled to ensure consistent test behavior across different environments.
-// To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
+// TestE2E runs the e2e suite against the kind cluster that `mise run test-e2e` created.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
-	_, _ = fmt.Fprintf(GinkgoWriter, "Starting omp-operator e2e test suite\n")
-	RunSpecs(t, "e2e suite")
+	_, _ = fmt.Fprintf(GinkgoWriter, "Starting omp-operator e2e suite\n")
+	RunSpecs(t, "omp-operator e2e suite")
 }
 
 var _ = BeforeSuite(func() {
-	By("building the manager image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
-	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
+	var err error
+	projectDir, err = findProjectDir()
+	Expect(err).NotTo(HaveOccurred())
 
-	// TODO(user): If you want to change the e2e test vendor from Kind,
-	// ensure the image is built and available, then remove the following block.
-	By("loading the manager image on Kind")
-	err = utils.LoadImageToKindClusterWithName(managerImage)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
+	By("resolving the pinned http-echo image")
+	echoImage, err = resolveEchoImage()
+	Expect(err).NotTo(HaveOccurred())
+	_, _ = fmt.Fprintf(GinkgoWriter, "echo image: %s\n", echoImage)
 
-	configureKubectlKubeRC()
-	setupCertManager()
+	By("loading the operator and e2e runtime images into kind")
+	for _, img := range []string{operatorImage, e2eImage} {
+		mustRun("kind", "load", "docker-image", img, "--name", kindCluster)
+	}
+
+	By("creating the namespaces")
+	for _, ns := range []string{systemNS, agentNS} {
+		mustApply(fmt.Sprintf("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n", ns))
+	}
+
+	By("creating the dashboard basic-auth Secret")
+	hash, err := bcrypt.GenerateFromPassword([]byte(dashPass), bcrypt.MinCost)
+	Expect(err).NotTo(HaveOccurred())
+	mustApply(secretYAML(systemNS, htpasswdS, map[string]string{"htpasswd": dashUser + ":" + string(hash) + "\n"}))
+
+	By("installing the chart")
+	values := map[string]any{
+		"image":        imageValues(operatorImage),
+		"runtimeImage": imageValues(e2eImage),
+		"rbac":         map[string]any{"agentNamespaces": []string{agentNS}},
+		"dashboard": map[string]any{
+			"basic": map[string]any{"existingSecret": htpasswdS},
+			"access": []map[string]any{{
+				"users":      []string{"basic:" + dashUser},
+				"namespaces": []string{"*"},
+				"role":       "viewer",
+			}},
+		},
+		"persistence": map[string]any{"size": "1Gi"},
+	}
+	raw, err := json.Marshal(values)
+	Expect(err).NotTo(HaveOccurred())
+	valuesFile := filepath.Join(GinkgoT().TempDir(), "values.json")
+	Expect(os.WriteFile(valuesFile, raw, 0o600)).To(Succeed())
+	mustRun("helm", "upgrade", "--install", release, filepath.Join(projectDir, "charts", "omp-operator"),
+		"--namespace", systemNS, "--values", valuesFile, "--wait", "--timeout", "5m")
+
+	By("deploying the echo server")
+	mustApply(echoYAML(echoImage))
+	mustRun("kubectl", "-n", agentNS, "rollout", "status", "deployment/echo", "--timeout=3m")
 })
 
 var _ = AfterSuite(func() {
-	teardownCertManager()
+	// The operator must still run while the namespace goes away so it can clear session finalizers.
+	for _, step := range [][]string{
+		{"kubectl", "delete", "namespace", agentNS, "--wait=true", "--timeout=3m", "--ignore-not-found"},
+		{"helm", "uninstall", release, "--namespace", systemNS, "--wait", "--timeout", "3m"},
+		{"kubectl", "delete", "namespace", systemNS, "--wait=false", "--ignore-not-found"},
+	} {
+		if out, err := run(step[0], step[1:]...); err != nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "teardown %s: %v\n%s\n", strings.Join(step, " "), err, out)
+		}
+	}
 })
 
-// Disable kubectl kuberc by default for test isolation.
-// This prevents local kubectl configurations from affecting test behavior.
-// To enable kuberc, set: KUBECTL_KUBERC=true
-func configureKubectlKubeRC() {
-	if os.Getenv("KUBECTL_KUBERC") != "true" {
-		By("disabling kubectl kuberc for test isolation")
-		err := os.Setenv("KUBECTL_KUBERC", "false")
-		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to disable kubectl kuberc")
-		_, _ = fmt.Fprintf(GinkgoWriter,
-			"kubectl kuberc disabled for consistent test behavior (override with KUBECTL_KUBERC=true)\n")
-	} else {
-		_, _ = fmt.Fprintf(GinkgoWriter, "kubectl kuberc enabled (KUBECTL_KUBERC=true)\n")
+// ReportAfterEach dumps what is needed to debug a failure: operator logs, pods, events and the CRs.
+var _ = ReportAfterEach(func(report SpecReport) {
+	if !report.Failed() {
+		return
 	}
+	dumpDiagnostics()
+})
+
+func imageValues(ref string) map[string]any {
+	repo, tag := ref, "latest"
+	if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+		repo, tag = ref[:i], ref[i+1:]
+	}
+	return map[string]any{"repository": repo, "tag": tag, "pullPolicy": "IfNotPresent"}
 }
 
-// setupCertManager installs CertManager if needed for webhook tests.
-// Skips installation if CERT_MANAGER_INSTALL_SKIP=true or if already present.
-func setupCertManager() {
-	if os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true" {
-		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager installation (CERT_MANAGER_INSTALL_SKIP=true)\n")
-		return
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-
-	By("checking if CertManager is already installed")
-	if utils.IsCertManagerCRDsInstalled() {
-		_, _ = fmt.Fprintf(GinkgoWriter, "CertManager is already installed. Skipping installation.\n")
-		return
-	}
-
-	// Mark for cleanup before installation to handle interruptions and partial installs.
-	shouldCleanupCertManager = true
-
-	By("installing CertManager")
-	Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install CertManager")
+	return fallback
 }
 
-// teardownCertManager uninstalls CertManager if it was installed by setupCertManager.
-// This ensures we only remove what we installed.
-func teardownCertManager() {
-	if !shouldCleanupCertManager {
-		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager cleanup (not installed by this suite)\n")
-		return
+func findProjectDir() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
 	}
-
-	By("uninstalling CertManager")
-	utils.UninstallCertManager()
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("go.mod not found above %s", dir)
+		}
+		dir = parent
+	}
 }
