@@ -33,11 +33,30 @@ behind the others.
 | `docker-build-e2e` | | e2e image: the driver plus `test/fakeomp` installed as `omp` (`E2E_IMG`, default `omp-operator-e2e:dev`) |
 | `ompcompat` | | Downloads the pinned omp release into `bin/`, checks it against the release's `SHA256SUMS.txt`, and runs `test/ompcompat` against it |
 | `test-e2e` | `docker-build`, `docker-build-e2e` | Creates a kind cluster `omp-operator-e2e` (unless it exists) with its own kubeconfig in `bin/` (your `~/.kube/config` is never touched), runs the e2e suite, and deletes the cluster on exit |
+| `dev:up` | | Creates (unless it exists) or updates the long-lived kind cluster `omp-dev`; see [dev cluster](#dev-cluster) |
+| `dev:login [anthropic\|openai-codex]` | | Logs the dev cluster's auth gateway in to a subscription |
+| `dev:status` | | Operator pods, agents, triggers and sessions of the dev cluster |
+| `dev:down` | | Deletes the dev cluster and `bin/dev` |
 
 `mise run run` starts the manager, which needs `POD_NAMESPACE` (it refuses to start without it) and a writable
 data directory (the default `/data` usually is not). With explicit flags:
 `POD_NAMESPACE=omp-system go run ./cmd --data-dir=/tmp/omp-data`. All flags are listed in the
 [operator reference](reference/operator.md#manager-flags).
+
+## Dev cluster
+
+`mise run dev:up` keeps a kind cluster `omp-dev` around for real use. It builds the three images with a fresh
+`dev-<epoch>` tag, loads them into kind, installs the chart with `hack/dev/values.yaml` (auth gateway on, agents
+in namespace `omp-dev`) and applies every other manifest in `hack/dev/` (a NodePort Service and the sample agent
+`hello`). It is idempotent: run it again after a code change. Everything uses `bin/dev/kubeconfig`, never
+`~/.kube/config`:
+
+- dashboard `http://127.0.0.1:30080`, user `dev`, password in `bin/dev/password`
+- webhooks `http://127.0.0.1:30082/hooks/<namespace>/<trigger>`
+- `bin/dev/token` is a random token for API clients
+
+`mise run dev:login` logs the gateway in to a Claude subscription (`openai-codex` for ChatGPT); the login
+survives `dev:up` and lasts until `dev:down`.
 
 ## Layout
 

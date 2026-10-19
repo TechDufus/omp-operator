@@ -1,0 +1,11 @@
+# The long-lived dev cluster (mise run dev:up). Ports are published on 127.0.0.1 only.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: omp-dev
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # dashboard and cloud API
+      - {containerPort: 30080, hostPort: 30080, listenAddress: 127.0.0.1}
+      # webhooks
+      - {containerPort: 30082, hostPort: 30082, listenAddress: 127.0.0.1}

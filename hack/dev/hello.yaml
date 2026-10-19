@@ -1,0 +1,44 @@
+# A minimal real-model agent for the dev cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: omp-dev
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: demo
+  namespace: omp-dev
+stringData:
+  token: not-a-secret-value
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hello-skill
+  namespace: omp-dev
+data:
+  hello-skill.md: |
+    ---
+    name: hello-skill
+    description: Greets people in the house style. Use when asked to greet someone.
+    ---
+    Greet people with "Howdy".
+---
+apiVersion: omp.techdufus.com/v1alpha1
+kind: OmpAgent
+metadata:
+  name: hello
+  namespace: omp-dev
+spec:
+  model:
+    default: anthropic/claude-sonnet-5-5
+    gateway:
+      url: http://omp-auth.omp-system.svc:4000
+  credentials:
+    - name: demo
+      description: demo credential
+      secretRef: {name: demo, key: token}
+      env: DEMO_TOKEN
+  skills:
+    - configMap: {name: hello-skill}

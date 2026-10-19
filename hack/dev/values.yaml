@@ -1,0 +1,10 @@
+# Helm values for the dev cluster (mise run dev:up).
+authGateway: {enabled: true}
+rbac: {agentNamespaces: [omp-dev]}
+persistence: {size: 10Gi}
+dashboard:
+  url: http://127.0.0.1:30080
+  basic: {existingSecret: omp-dev-basic}
+  access:
+    - {users: ["basic:dev"], namespaces: ["*"], role: viewer}
+hooks: {publicURL: http://127.0.0.1:30082}

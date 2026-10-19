@@ -133,3 +133,94 @@ fi
 trap 'kind delete cluster --name "$KIND_CLUSTER"; rm -f "$KUBECONFIG"' EXIT
 go test -tags e2e ./test/e2e/ -v -ginkgo.v -timeout 30m
 '''
+
+[tasks."dev:up"]
+description = "Create or update the long-lived kind dev cluster omp-dev (idempotent)"
+shell = "bash -c"
+run = '''
+set -euo pipefail
+export KUBECONFIG="$PWD/bin/dev/kubeconfig"
+mkdir -p bin/dev
+if ! kind get clusters | grep -qx omp-dev; then
+  kind create cluster --config hack/dev/kind.yaml
+else
+  kind export kubeconfig --name omp-dev
+fi
+TAG="dev-$(date +%s)"
+docker build -q -t "omp-operator:$TAG" .
+docker build -q -f images/runtime/Dockerfile -t "omp-operator-runtime:$TAG" .
+docker build -q -f images/e2e/Dockerfile -t "omp-operator-e2e:$TAG" .
+kind load docker-image --name omp-dev "omp-operator:$TAG" "omp-operator-runtime:$TAG" "omp-operator-e2e:$TAG"
+echo "$TAG" > bin/dev/tag
+umask 077
+[ -s bin/dev/password ] || head -c 18 /dev/urandom | base64 | tr '+/' '-_' > bin/dev/password
+[ -s bin/dev/token ] || od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > bin/dev/token
+chmod 0600 bin/dev/password bin/dev/token
+umask 022
+for ns in omp-system omp-dev; do
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
+done
+go run ./hack/dev/htpasswd dev bin/dev/password \
+  | kubectl -n omp-system create secret generic omp-dev-basic --from-file=htpasswd=/dev/stdin --dry-run=client -o yaml \
+  | kubectl apply -f -
+helm upgrade --install omp charts/omp-operator -n omp-system -f hack/dev/values.yaml \
+  --set image.repository=omp-operator --set image.tag="$TAG" \
+  --set runtimeImage.repository=omp-operator-runtime --set runtimeImage.tag="$TAG" \
+  --wait --timeout 5m
+for f in hack/dev/*.yaml; do
+  case "$(basename "$f")" in kind.yaml|values.yaml) continue ;; esac
+  sed "s/__DEV_TAG__/$TAG/" "$f" | kubectl apply -f -
+done
+docker exec omp-dev-control-plane crictl rmi --prune >/dev/null || true
+echo
+echo "dashboard: http://127.0.0.1:30080 (user dev)"
+echo "password:  $PWD/bin/dev/password"
+echo "token:     $PWD/bin/dev/token"
+echo "kubeconfig: $KUBECONFIG"
+'''
+
+[tasks."dev:login"]
+description = "Log the dev cluster's auth gateway in to a provider: anthropic (default) or openai-codex"
+shell = "bash -c"
+usage = 'arg "[provider]" default="anthropic" help="anthropic or openai-codex"'
+run = '''
+set -euo pipefail
+export KUBECONFIG="$PWD/bin/dev/kubeconfig"
+provider="${usage_provider:-anthropic}"
+case "$provider" in
+  anthropic) port=54545 ;;
+  openai-codex) port=1455 ;;
+  *) echo "unknown provider $provider (anthropic or openai-codex)" >&2; exit 2 ;;
+esac
+kubectl -n omp-system port-forward deploy/omp-auth "$port:$port" >/dev/null &
+pf=$!
+trap 'kill $pf 2>/dev/null || true' EXIT
+kubectl -n omp-system exec -it deploy/omp-auth -c gateway -- omp auth-broker login "$provider"
+kubectl -n omp-system rollout restart deploy/omp-auth
+kubectl -n omp-system rollout status deploy/omp-auth --timeout 5m
+'''
+
+[tasks."dev:status"]
+description = "Show the dev cluster's operator pods, agents, triggers and sessions"
+shell = "bash -c"
+run = '''
+set -euo pipefail
+export KUBECONFIG="$PWD/bin/dev/kubeconfig"
+kubectl get pods -n omp-system
+kubectl get ompagents,omptriggers,ompsessions -A
+echo
+echo "dashboard: http://127.0.0.1:30080 (user dev)"
+echo "webhooks:  http://127.0.0.1:30082"
+echo "password:  $PWD/bin/dev/password"
+echo "token:     $PWD/bin/dev/token"
+'''
+
+[tasks."dev:down"]
+description = "Delete the dev cluster and its local files"
+shell = "bash -c"
+run = '''
+set -euo pipefail
+export KUBECONFIG="$PWD/bin/dev/kubeconfig"
+kind delete cluster --name omp-dev
+rm -rf bin/dev
+'''
