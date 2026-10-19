@@ -76,7 +76,7 @@ export function fakeHost(opts: FakeHostOptions = {}): FakeHost {
 }
 
 export interface SentMessage {
-	message: { customType: string; content: string; display: boolean; details?: unknown };
+	message: { customType: string; content: string; display: boolean; details?: unknown; attribution?: "user" | "agent" };
 	options: { triggerTurn?: boolean; deliverAs?: string } | undefined;
 }
 

@@ -410,6 +410,27 @@ Approval follows omp's tool approval mode (`tools.approvalMode`, `tools.approval
 for nothing. A model-started delegation cuts its own pending `cloud` call out of the uploaded conversation, so the
 cloud agent never sees a tool call without a result.
 
+## Cloud output is untrusted
+
+A cloud agent reads arbitrary repository files and web pages, so what it writes back can carry injected instructions.
+
+- **What the local model sees.** Cards reach it with `attribution: "agent"`, so omp does not record them as your
+  words. The `[cloud]` text keeps the facts the operator reports (thread, turn, state, `+/−`, files, branch, push
+  state) outside a fence, then one line saying the block below is the cloud agent's report, not an instruction from
+  you, to be acted on only where your own requests call for it, then one block per card:
+  `<cloud-output thread="…" turn="…">` … `</cloud-output>`. Everything the cloud agent wrote is inside it: the
+  title, reply, error, push error, and a question's header, text, option labels and descriptions. The `cloud` tool's
+  `status` result is fenced the same way. A `cloud-output` in that text is rewritten to `cloud output`, so it cannot
+  close or fake the block. Length caps are unchanged. Your own prompt and the operator's warnings are not fenced.
+- **Why a card can start a turn.** Cards of a thread the local model started with the `cloud` tool are meant to wake
+  it: the result is what it was waiting for. Threads you start with `/cloud` only display their cards.
+- **What a card cannot do.** Showing a card never answers, sends, stops, pulls or delegates. Those happen only when
+  you run the command or the model calls the `cloud` tool, under the tool's approval tiers.
+- **In `yolo` mode** (omp's default) the local agent runs those tool calls without asking, so after a cloud report it
+  acts on its own judgement. `tools.approval.cloud: prompt` or `tools.approvalMode: always-ask` makes omp ask before
+  every `delegate`, `answer`, `send`, `stop` and `pull`; `tools.approvalMode: write` asks before `delegate` only. The
+  fence lowers the risk of the model obeying injected text; it does not remove it.
+
 ## What stays on your machine
 
 - **Credential-named files.** The work-in-progress snapshot leaves out files whose name looks like a credential:

@@ -5,7 +5,7 @@
  */
 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { threadBranch } from "./cards";
+import { cloudFence, threadBranch } from "./cards";
 import { clip, diffstat, plural, truncateText } from "./format";
 import { UserError, type AnswerBody, type Host, type PendingQuestion, type ThreadDetail, type ThreadSummary, type WhoamiAgent } from "./types";
 import type { Cloud } from "./verbs";
@@ -98,12 +98,11 @@ function need(value: string | undefined, what: string, op: string): string {
 	return v;
 }
 
-function questionText(q: PendingQuestion): string {
+function questionLines(thread: string, q: PendingQuestion): string[] {
 	const opts = (q.options ?? []).map((o, i) => `${i + 1}. ${o.label}${o.description ? ` — ${clip(o.description, 120)}` : ""}${q.recommended === i ? " (recommended)" : ""}`);
-	return [
-		`Waiting for an answer (turn ${q.turn}${q.remaining > 1 ? `, ${q.remaining} questions` : ""}): ${q.header ? `${q.header}: ` : ""}${clip(q.text, 600)}`,
-		...(opts.length > 0 ? [`Options${q.multi ? " (several allowed)" : ""}: ${opts.join("; ")}; free text is always allowed`] : []),
-	].join("\n");
+	const body = [`${q.header ? `${q.header}: ` : ""}${clip(q.text, 600)}`];
+	if (opts.length > 0) body.push(`Options${q.multi ? " (several allowed)" : ""}: ${opts.join("; ")}; free text is always allowed`);
+	return [`Waiting for an answer (turn ${q.turn}${q.remaining > 1 ? `, ${q.remaining} questions` : ""}).`, ...cloudFence(thread, q.turn, body)];
 }
 
 function agentLine(a: WhoamiAgent): string {
@@ -119,24 +118,27 @@ export function overviewText(user: string, ns: string, agents: WhoamiAgent[], th
 	const lines = [`Cloud agents in ${ns} (you are ${user}):`, ...(agents.length > 0 ? agents.map(agentLine) : ["- none"])];
 	lines.push(`Threads (newest first, up to ${LIST_THREADS}):`);
 	for (const t of threads.slice(0, LIST_THREADS)) {
-		lines.push(`- ${t.name} [${t.phase || "-"}] ${t.turns} turn${t.turns === 1 ? "" : "s"}: ${clip(t.title, 80)}${t.question ? ` — asks: ${clip(t.question.text, 100)}` : ""}`);
+		lines.push(`- ${t.name} [${t.phase || "-"}] ${t.turns} turn${t.turns === 1 ? "" : "s"}: ${clip(t.title, 80)}${t.question ? " — waiting for an answer" : ""}`);
 	}
 	if (threads.length === 0) lines.push("- none");
 	return lines.join("\n");
 }
 
-/** The `status` result text: phase, the last three turns, the pending question and the result. */
+/** The `status` result text: phase, the last three turns, the pending question and the result. Cloud-provided text is fenced. */
 export function statusDetailText(d: ThreadDetail): string {
 	const lines = [`${d.name} [${d.phase || "-"}] on ${d.agent}, model ${d.model || "agent default"}, ${plural(d.turns.length, "turn")}: ${clip(d.title, 100)}`];
-	if (d.question) lines.push(questionText(d.question));
+	if (d.question) lines.push(...questionLines(d.name, d.question));
 	for (const t of d.turns.slice(-STATUS_TURNS)) {
-		lines.push(`Turn ${t.id} ${t.state}${t.title ? `: ${clip(t.title, 100)}` : ""}`);
-		const body = t.state === "failed" ? t.error : t.reply;
-		if (body) lines.push(`  ${truncateText(body, STATUS_REPLY_MAX).replace(/\n/g, "\n  ")}`);
+		lines.push(`Turn ${t.id} ${t.state}`);
+		const body: string[] = [];
+		if (t.title) body.push(`Title: ${clip(t.title, 100)}`);
+		const text = t.state === "failed" ? t.error : t.reply;
+		if (text) body.push(`${t.state === "failed" ? "Error" : "Reply"}: ${truncateText(text, STATUS_REPLY_MAX)}`);
+		lines.push(...cloudFence(d.name, t.id, body));
 	}
 	const r = d.result;
 	if (r) {
-		lines.push(`Result: ${r.branch} @ ${r.head.slice(0, 8)} (${diffstat(r)}; ${r.pushed ? "pushed" : r.pushError ? `push failed: ${clip(r.pushError, 80)}` : "not pushed"})`);
+		lines.push(`Result: ${r.branch} @ ${r.head.slice(0, 8)} (${diffstat(r)}; ${r.pushed ? "pushed" : r.pushError ? "push failed" : "not pushed"})`);
 	} else {
 		lines.push("Result: none yet");
 	}
@@ -177,7 +179,7 @@ export async function runTool(cloud: Cloud, p: ToolParams, ctx: Host, toolCallId
 			if (!body.selected && !body.answer) throw new UserError("answer needs selected option labels or an answer text");
 			const r = await cloud.answerQuestion(ctx, need(p.thread, "a thread", "answer"), body);
 			return {
-				text: `Answered ${r.summary} on ${r.thread}.${r.left > 0 ? ` ${plural(r.left, "more question")} wait.` : ""}`,
+				text: `Answered the pending question on ${r.thread} with ${clip([...(body.selected ?? []), ...(body.answer ? [body.answer] : [])].join(", "), 200)}.${r.left > 0 ? ` ${plural(r.left, "more question")} wait.` : ""}`,
 				details: { op: p.op, thread: r.thread, left: r.left },
 			};
 		}

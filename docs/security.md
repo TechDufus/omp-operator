@@ -182,6 +182,15 @@ token), network and tools, in a place you do not watch. Ship only what you trust
 agent like any other. Your local provider login is never shipped; with a gateway the pod's model credential is the
 gateway token for the models you allow ([model access](model-access.md)).
 
+**Cloud output is untrusted.** The cloud agent reads arbitrary repository files and web pages, so its replies, turn
+titles, errors and questions can carry injected instructions. The `omp-cloud` extension delivers them to your local
+model with `attribution: "agent"` (not as your words), and puts every string the cloud agent wrote inside one
+`<cloud-output>` block, preceded by a line saying it is the cloud agent's report and not an instruction from you; a
+`cloud-output` inside the text is rewritten to `cloud output` so it cannot forge the block. That reduces the risk; it
+is not a guarantee. A card never answers, sends, stops or pulls on its own, but cards of threads your local model
+started wake it, and in `yolo` approval mode it then acts on its own judgement. See
+[cloud output is untrusted](cloud.md#cloud-output-is-untrusted).
+
 ## Dashboard
 
 Read-only, namespace-scoped access rules (404 for anything not granted), signed `HttpOnly` `Secure`

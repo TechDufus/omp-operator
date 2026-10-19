@@ -238,7 +238,7 @@ export type DeliverAs = "steer" | "followUp" | "nextTurn" | "aside";
 export interface PiHost {
 	getThinkingLevel(): string | undefined;
 	sendMessage(
-		message: { customType: string; content: string; display: boolean; details?: unknown },
+		message: { customType: string; content: string; display: boolean; details?: unknown; attribution?: "user" | "agent" },
 		options?: { triggerTurn?: boolean; deliverAs?: DeliverAs },
 	): void;
 }

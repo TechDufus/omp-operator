@@ -19,6 +19,8 @@ interface Message {
 	content: string;
 	display: boolean;
 	details: CardDetails;
+	/** Cards are relayed text, never the user's words: the model must not read them as user input. */
+	attribution: "agent";
 }
 
 /** Whether a card wakes the model (a tool-started thread's results and questions). */
@@ -96,7 +98,7 @@ export class Deliverer implements WatchSink {
 
 	/** Sends the card; see the module comment for who is woken. */
 	post(host: Host, d: CardDetails): void {
-		const msg: Message = { customType: CARD_TYPE, content: cardContent(d), display: true, details: d };
+		const msg: Message = { customType: CARD_TYPE, content: cardContent(d), display: true, details: d, attribution: "agent" };
 		if (host.isIdle()) {
 			this.#pi.sendMessage(msg, { triggerTurn: wakesModel(d) });
 		} else if (wakesModel(d)) {
