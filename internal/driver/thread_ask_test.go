@@ -41,6 +41,7 @@ type apiAsk struct {
 	asked     time.Time
 	questions []agentapi.Question
 	expires   []string // the answer text of every expire call
+	reasons   []string // the reason of every expire call
 }
 
 // askHuman is the person at the other end: after After they answer every question of every ask.
@@ -164,10 +165,15 @@ func (a *threadAPI) expireAsk(w http.ResponseWriter, r *http.Request, n string) 
 	}
 	ask := a.asks[idx-1]
 	ask.expires = append(ask.expires, body.Answer)
+	ask.reasons = append(ask.reasons, body.Reason)
+	by := "timeout"
+	if body.Reason == agentapi.AskExpireDropped {
+		by = "dropped"
+	}
 	for i := range ask.questions {
 		if q := &ask.questions[i]; q.AnsweredBy == "" {
 			at := time.Now()
-			q.Answer, q.AnsweredBy, q.Expired, q.AnsweredAt = body.Answer, "timeout", true, &at
+			q.Answer, q.AnsweredBy, q.Expired, q.AnsweredAt = body.Answer, by, true, &at
 		}
 	}
 	a.json(w, askState(ask))
@@ -279,7 +285,8 @@ func TestThreadAskTimesOutWithTheNoteAndNeverACancel(t *testing.T) {
 	if elapsed := time.Since(start); elapsed < time.Second {
 		t.Fatalf("the sitting ended after %v, before the question timeout", elapsed)
 	}
-	if len(env.api.asks) != 1 || len(env.api.asks[0].expires) != 1 || env.api.asks[0].expires[0] != note {
+	if len(env.api.asks) != 1 || len(env.api.asks[0].expires) != 1 || env.api.asks[0].expires[0] != note ||
+		env.api.asks[0].reasons[0] != agentapi.AskExpireTimeout {
 		t.Fatalf("asks = %+v, want exactly one expire with the note", env.api.asks)
 	}
 	// The agent received the note as the answer of every question (omp would have picked a
@@ -297,6 +304,41 @@ func TestThreadAskTimesOutWithTheNoteAndNeverACancel(t *testing.T) {
 	if len(answered) != 1 || answered[0] != "answered by timeout" {
 		t.Fatalf("answer events = %v", answered)
 	}
+}
+
+func TestThreadAskOpenWhenTheTurnEndsIsDropped(t *testing.T) {
+	env := newThreadEnv(t, func(cfg *agentapi.SessionConfig) { cfg.Thread.QuestionTimeoutSeconds = 600 })
+	env.api.enqueue(twoQuestions) // nobody answers
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for env.api.turnState(1) != "running" || env.api.askCount() == 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel() // SIGTERM while the question waits: the turn ends with it open
+	}()
+
+	if err := env.d.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	env.api.mu.Lock()
+	defer env.api.mu.Unlock()
+	if len(env.api.asks) != 1 || len(env.api.asks[0].reasons) != 1 || env.api.asks[0].reasons[0] != agentapi.AskExpireDropped ||
+		env.api.asks[0].expires[0] != askDropped {
+		t.Fatalf("asks = %+v, want one expire with reason dropped", env.api.asks)
+	}
+	for _, q := range env.api.asks[0].questions {
+		if q.AnsweredBy != "dropped" || !q.Expired || q.Answer != askDropped {
+			t.Fatalf("question = %+v, want answered by dropped", q)
+		}
+	}
+}
+
+func (a *threadAPI) askCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.asks)
 }
 
 func TestThreadAskStopDuringTheWaitAbortsTheTurn(t *testing.T) {

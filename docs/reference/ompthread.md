@@ -64,7 +64,7 @@ An answer is `selected` (option labels), free text (at most 4000 bytes), or both
 
 A question nobody answered within `cloud.questionTimeout` expires: the agent is told to continue with its best
 judgment, say what it assumed, and ask again at the end of its turn if it still matters. A stop expires every open
-question of the running turn at once. Expired questions have `expired: true` and `answeredBy` `timeout` or `stop`. A
+question of the running turn at once. A question whose turn ended while it was still open is closed too. Expired questions have `expired: true` and `answeredBy` `timeout`, `stop` or `dropped`. A
 turn that is redone in a new sitting after its sitting died loses its questions.
 
 ## Sittings

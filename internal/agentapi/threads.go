@@ -333,7 +333,8 @@ func (s *Server) handleThreadAskState(w http.ResponseWriter, r *http.Request, re
 	writeJSON(w, http.StatusOK, askState(ask, qs, true))
 }
 
-// handleThreadAskExpire answers the open questions of an ask with the driver's text (its question timeout ran out).
+// handleThreadAskExpire answers the open questions of an ask with the driver's text: its question
+// timeout ran out, or (reason dropped) the turn ended with the question open.
 func (s *Server) handleThreadAskExpire(w http.ResponseWriter, r *http.Request, req *threadReq) {
 	id, ask, ok := askIDs(w, r, true)
 	if !ok {
@@ -343,7 +344,17 @@ func (s *Server) handleThreadAskExpire(w http.ResponseWriter, r *http.Request, r
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	qs, err := s.Threads.ExpireAsk(req.ns, req.thread.Name, req.name, id, ask, body.Answer, threads.AnsweredByTimeout)
+	var by string
+	switch body.Reason {
+	case "", AskExpireTimeout:
+		by = threads.AnsweredByTimeout
+	case AskExpireDropped:
+		by = threads.AnsweredByDropped
+	default:
+		writeError(w, http.StatusBadRequest, "reason must be "+AskExpireTimeout+" or "+AskExpireDropped)
+		return
+	}
+	qs, err := s.Threads.ExpireAsk(req.ns, req.thread.Name, req.name, id, ask, body.Answer, by)
 	if err != nil {
 		s.askError(w, "expire ask", err)
 		return

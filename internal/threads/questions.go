@@ -42,9 +42,11 @@ const (
 	MaxQuestionKeyBytes    = 200
 	MaxQuestionHeaderBytes = 200
 
-	// AnsweredByTimeout and AnsweredByStop are the Question.AnsweredBy of a question
-	// that no person answered: the driver's question timeout ran out, or the thread was stopped.
+	// AnsweredByTimeout, AnsweredByDropped and AnsweredByStop are the Question.AnsweredBy of a question
+	// that no person answered: the driver's question timeout ran out, its turn ended with the question
+	// open, or the thread was stopped.
 	AnsweredByTimeout = "timeout"
+	AnsweredByDropped = "dropped"
 	AnsweredByStop    = "stop"
 )
 
@@ -91,7 +93,7 @@ type Question struct {
 	Selected []string `json:"selected,omitempty"`
 	// Answer is the free-text answer.
 	Answer string `json:"answer,omitempty"`
-	// AnsweredBy is the principal that answered, or AnsweredByTimeout or AnsweredByStop.
+	// AnsweredBy is the principal that answered, or AnsweredByTimeout, AnsweredByDropped or AnsweredByStop.
 	AnsweredBy string     `json:"answeredBy,omitempty"`
 	AnsweredAt *time.Time `json:"answeredAt,omitempty"`
 	// Expired is true when the timeout or a stop answered, not a person.

@@ -375,7 +375,16 @@ type AskState struct {
 // question of the ask that is still open.
 type AskExpire struct {
 	Answer string `json:"answer"`
+	// Reason says why the questions are closed: AskExpireTimeout (the default when empty), the
+	// driver's question timeout ran out, or AskExpireDropped, the turn ended with them open.
+	Reason string `json:"reason,omitempty"`
 }
+
+// The values of AskExpire.Reason.
+const (
+	AskExpireTimeout = "timeout"
+	AskExpireDropped = "dropped"
+)
 
 // ActionResult is the response of POST /v1/sessions/{ns}/{name}/actions/{tool}.
 type ActionResult struct {

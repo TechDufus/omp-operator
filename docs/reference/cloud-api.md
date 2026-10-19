@@ -64,7 +64,8 @@ insertions, deletions, pushed, pushError, questions}`. `text` is cut to 2000 byt
 askedAt, selected, answer, answeredBy, answeredAt, expired}` with the empty fields omitted. `id` is 1-based within
 the turn, `ask` numbers the agent's `ask` calls within the turn (questions of one call are answered together), `key`
 is omp's question id, `selected` are option labels and `answer` is free text. A question that nobody answered in time
-has `expired: true` and `answeredBy: "timeout"`, and one that a stop ended has `answeredBy: "stop"`.
+has `expired: true` and `answeredBy: "timeout"`, one that a stop ended has `answeredBy: "stop"`, and one whose turn
+ended while it was still open (the sitting was interrupted, for example) has `answeredBy: "dropped"`.
 
 ## Creating a thread
 

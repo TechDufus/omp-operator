@@ -83,7 +83,8 @@ func (d *Driver) writeThreadOmpConfig(cfg agentapi.SessionConfig) error {
 //     the default role is always the thread's model;
 //   - the thinking level of the thread wins over the shipped one;
 //   - approvals are off, and the features that need a person or a desktop are disabled:
-//     computer use, collab rooms, marketplace updates.
+//     computer use, collab rooms, marketplace updates;
+//   - omp's own ask timeout is off: only the operator's cloud.questionTimeout ends a wait.
 func mergeThreadSettings(settings map[string]any, cfg agentapi.SessionConfig) {
 	model := cfg.Model.Default
 	served := map[string]bool{}
@@ -115,6 +116,9 @@ func mergeThreadSettings(settings map[string]any, cfg agentapi.SessionConfig) {
 	setNested(settings, "computer", "enabled", false)
 	setNested(settings, "collab", "autoStart", "off")
 	setNested(settings, "marketplace", "autoUpdate", "off")
+	// Questions wait for the operator's questionTimeout, not for omp's own ask timeout, which would
+	// time out or auto-pick an answer on its own.
+	setNested(settings, "ask", "timeout", 0)
 }
 
 // toAnyMap returns v as a map[string]any, converting a map[string]string; anything else yields an empty map.

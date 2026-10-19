@@ -389,10 +389,11 @@ func (c *Client) WaitAsk(ctx context.Context, turn, ask int, wait time.Duration)
 }
 
 // ExpireAsk is POST thread/turns/{id}/asks/{ask}/expire: the open questions of the ask get
-// answer as their answer. It returns the final state; repeating it is harmless.
-func (c *Client) ExpireAsk(ctx context.Context, turn, ask int, answer string) (agentapi.AskState, error) {
+// answer as their answer, closed for reason (agentapi.AskExpireTimeout or AskExpireDropped). It
+// returns the final state; repeating it is harmless.
+func (c *Client) ExpireAsk(ctx context.Context, turn, ask int, answer, reason string) (agentapi.AskState, error) {
 	var st agentapi.AskState
 	path := c.path(askPath(turn) + "/" + strconv.Itoa(ask) + "/expire")
-	err := c.doJSON(ctx, http.MethodPost, path, agentapi.AskExpire{Answer: answer}, &st, true)
+	err := c.doJSON(ctx, http.MethodPost, path, agentapi.AskExpire{Answer: answer, Reason: reason}, &st, true)
 	return st, err
 }

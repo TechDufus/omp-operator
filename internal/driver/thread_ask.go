@@ -360,7 +360,7 @@ func (b *askBridge) await(t *askTurn, st agentapi.AskState) (agentapi.AskState, 
 
 	ectx, cancel := context.WithTimeout(t.ctx, controlTimeout)
 	defer cancel()
-	final, err := b.d.API.ExpireAsk(ectx, t.id, st.Ask, expiredAnswer(b.timeout))
+	final, err := b.d.API.ExpireAsk(ectx, t.id, st.Ask, expiredAnswer(b.timeout), agentapi.AskExpireTimeout)
 	switch {
 	case t.ctx.Err() != nil:
 		return st, false
@@ -377,7 +377,7 @@ func (b *askBridge) await(t *askTurn, st agentapi.AskState) (agentapi.AskState, 
 func (b *askBridge) drop(t *askTurn, st agentapi.AskState) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.ctx), abortTimeout)
 	defer cancel()
-	if _, err := b.d.API.ExpireAsk(ctx, t.id, st.Ask, askDropped); err != nil {
+	if _, err := b.d.API.ExpireAsk(ctx, t.id, st.Ask, askDropped, agentapi.AskExpireDropped); err != nil {
 		b.d.Log.Warn("drop ask", "error", err)
 	}
 }

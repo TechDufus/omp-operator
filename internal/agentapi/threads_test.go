@@ -445,6 +445,38 @@ func TestThreadAskExpire(t *testing.T) {
 	expect(t, e.do(http.MethodGet, sessPrefix+"/thread/turns/1/asks/1", sittingToken, nil), 200)
 }
 
+func TestThreadAskExpireReasons(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason string
+		want   int
+		by     string
+	}{
+		{"default is timeout", "", 200, "timeout"},
+		{"timeout", AskExpireTimeout, 200, "timeout"},
+		{"dropped", AskExpireDropped, 200, "dropped"},
+		{"anything else", "stop", 400, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := threadEnv(t, threadObj(nil), cloudAgentObj(nil))
+			runningThreadTurn(t, e)
+			expect(t, e.do(http.MethodPost, sessPrefix+"/thread/turns/1/asks", sittingToken,
+				AskRequest{Questions: []AskQuestion{{Key: "a", Text: "a?"}}}), 201)
+			r := e.do(http.MethodPost, sessPrefix+"/thread/turns/1/asks/1/expire", sittingToken,
+				AskExpire{Answer: "closed", Reason: tt.reason})
+			expect(t, r, tt.want)
+			qs, err := e.srv.Threads.AskState(ns, threadName, sitting, 1, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if q := qs[0]; q.AnsweredBy != tt.by || q.Expired != (tt.by != "") {
+				t.Errorf("question = %+v, want answered by %q", q, tt.by)
+			}
+		})
+	}
+}
+
 func TestThreadAskErrors(t *testing.T) {
 	e := threadEnv(t, threadObj(nil), cloudAgentObj(nil))
 	one := AskRequest{Questions: []AskQuestion{{Key: "a", Text: "a?"}}}

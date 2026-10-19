@@ -322,6 +322,12 @@ theme: dark
 			wantKeys: map[string]any{"defaultThinkingLevel": "low"},
 		},
 		{
+			name:     "a shipped non-zero ask timeout is switched off",
+			shipped:  "ask:\n  timeout: 30\n",
+			cfg:      cfg("", gateway),
+			wantRole: map[string]string{"default": "anthropic/claude-sonnet-5-5"},
+		},
+		{
 			name:     "no gateway: every role is the thread's model",
 			shipped:  "modelRoles:\n  smol: anthropic/claude-haiku-5\n",
 			cfg:      cfg("", nil),
@@ -364,6 +370,8 @@ theme: dark
 			for group, want := range map[string]map[string]any{
 				"computer": {"enabled": false}, "collab": {"autoStart": "off"},
 				"marketplace": {"autoUpdate": "off"}, "tools": {"approvalMode": "yolo"},
+				// omp's own ask timeout must not answer for the user before cloud.questionTimeout does.
+				"ask": {"timeout": float64(0)},
 			} {
 				m, _ := got[group].(map[string]any)
 				for k, v := range want {
