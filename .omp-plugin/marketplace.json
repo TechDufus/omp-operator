@@ -1,0 +1,12 @@
+{
+  "name": "omp-operator",
+  "owner": {
+    "name": "TechDufus"
+  },
+  "plugins": [
+    {
+      "name": "omp-cloud",
+      "source": "./clients/omp-cloud"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "omp-cloud",
+  "version": "0.2.0",
+  "description": "Hand omp conversations off to cloud agents running on omp-operator",
+  "type": "module",
+  "omp": {
+    "extensions": ["./src/index.ts"]
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.12.2",
+    "@types/bun": "1.4.3",
+    "typescript": "7.0.2"
+  }
+}

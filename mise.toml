@@ -1,5 +1,6 @@
 [tools]
 "aqua:kubernetes-sigs/kubebuilder" = "4.16.0"
+bun = "1.4.3"
 go = "1.27.2"
 "go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint" = "2.15.0"
 helm = "4.3.0"
@@ -68,8 +69,25 @@ go test $(go list ./... | grep -v -e /test/e2e -e /test/ompcompat) -coverprofile
 
 [tasks.ci]
 description = "Lint, test and lint the chart"
-depends = ["lint", "test", "chart-sync"]
+depends = ["lint", "test", "chart-sync", "client:test", "client:typecheck"]
 run = "helm lint charts/omp-operator"
+
+[tasks."client:deps"]
+description = "Install the omp-cloud extension's dev dependencies (frozen lockfile)"
+dir = "clients/omp-cloud"
+run = "bun install --frozen-lockfile"
+
+[tasks."client:test"]
+description = "Run the omp-cloud extension's bun tests"
+depends = ["client:deps"]
+dir = "clients/omp-cloud"
+run = "bun test"
+
+[tasks."client:typecheck"]
+description = "Typecheck the omp-cloud extension"
+depends = ["client:deps"]
+dir = "clients/omp-cloud"
+run = "bunx tsc --noEmit -p ."
 
 [tasks.build]
 description = "Build the manager and the in-pod driver"
