@@ -113,6 +113,64 @@ type threadView struct {
 	SecretEnv                                []string
 	Queued                                   int32
 	TurnCount                                int
+	Questions                                []questionRowView
+	Pending                                  *pendingView
+	AnswerHint                               string
+}
+
+type optionView struct {
+	Label, Description string
+	Recommended        bool
+}
+
+// questionRowView is one question the agent asked, with its answer.
+type questionRowView struct {
+	Turn, ID, Ask             int
+	Header, Text              string
+	Options                   []optionView
+	Multi                     bool
+	Asked, Status, Selected   string
+	Free, By, Answered        string
+	Pending, Expired, Waiting bool
+}
+
+// pendingView is the oldest unanswered question of the running turn.
+type pendingView struct {
+	questionRowView
+	Remaining int
+}
+
+func questionRows(ts []threads.Turn) []questionRowView {
+	var out []questionRowView
+	pending := threads.PendingQuestion(ts)
+	for _, t := range ts {
+		for _, q := range t.Questions {
+			out = append(out, questionRow(t.ID, q, pending != nil && pending.Turn == t.ID && pending.Question.ID == q.ID))
+		}
+	}
+	return out
+}
+
+func questionRow(turn int, q threads.Question, pending bool) questionRowView {
+	row := questionRowView{
+		Turn: turn, ID: q.ID, Ask: q.Ask, Header: q.Header, Text: q.Text, Multi: q.Multi, Asked: stamp(q.AskedAt),
+		Selected: strings.Join(q.Selected, ", "), Free: q.Answer, By: q.AnsweredBy, Expired: q.Expired,
+		Pending: pending, Status: "waiting for an answer", Waiting: !q.Answered(),
+	}
+	for i, o := range q.Options {
+		row.Options = append(row.Options, optionView{Label: o.Label, Description: o.Description, Recommended: q.Recommended != nil && *q.Recommended == i})
+	}
+	switch {
+	case q.Expired:
+		row.Status = "expired (" + q.AnsweredBy + ")"
+		row.By = ""
+	case q.Answered():
+		row.Status = "answered"
+	}
+	if q.AnsweredAt != nil {
+		row.Answered = stamp(*q.AnsweredAt)
+	}
+	return row
 }
 
 func clip(s string, n int) string {
@@ -199,7 +257,7 @@ func (s *Server) buildThreadView(ctx context.Context, t *v1alpha1.OmpThread) (th
 		Created: s.when(&t.CreationTimestamp), LastActivity: s.when(st.LastActivityAt),
 		ActiveSession: st.ActiveSession, Queued: st.Queued, SecretFiles: sp.SecretFiles, SecretEnv: sp.SecretEnv,
 		PullHint: "/cloud pull " + t.Name,
-		Refresh:  st.Phase == v1alpha1.ThreadPhaseWorking,
+		Refresh:  st.Phase == v1alpha1.ThreadPhaseWorking || st.Phase == v1alpha1.ThreadPhaseWaiting,
 	}
 	if sp.Repo.RemoteURL != "" {
 		v.Repo = sp.Repo.Name + " (" + safeURL(sp.Repo.RemoteURL) + ")"
@@ -235,6 +293,12 @@ func (s *Server) buildThreadView(ctx context.Context, t *v1alpha1.OmpThread) (th
 		}
 		v.Turns = s.turnViews(turns)
 		v.TurnCount = len(turns)
+		v.Questions = questionRows(turns)
+		if p := threads.PendingQuestion(turns); p != nil {
+			v.Phase, v.Refresh = string(v1alpha1.ThreadPhaseWaiting), true
+			v.Pending = &pendingView{questionRowView: questionRow(p.Turn, p.Question, true), Remaining: p.Remaining}
+			v.AnswerHint = "/cloud answer " + t.Name
+		}
 		if !v.Refresh {
 			for _, tu := range turns {
 				if tu.State == v1alpha1.TurnStateQueued || tu.State == v1alpha1.TurnStateRunning {

@@ -113,6 +113,9 @@ type Turn struct {
 	Deletions    int    `json:"deletions,omitempty"`
 	Pushed       bool   `json:"pushed,omitempty"`
 	PushError    string `json:"pushError,omitempty"`
+
+	// Questions are the questions the agent asked during the turn (omp's ask tool).
+	Questions []Question `json:"questions,omitempty"`
 }
 
 // Finished reports whether the turn will not change any more: done, failed or cancelled.
@@ -402,7 +405,8 @@ func (l *Log) Complete(ns, thread, session string, id int, r Result) error {
 
 // Stop ends the thread's work on behalf of by: the running turn, if any, gets
 // StopRequested and StoppedBy so its driver aborts it (the turn then completes
-// as failed "stopped by <by>"), and every queued turn becomes cancelled.
+// as failed "stopped by <by>"), and every queued turn becomes cancelled. The
+// running turn's unanswered questions are expired with AnsweredBy "stop".
 // stoppedRunning reports that a turn is running and has been asked to stop;
 // cancelled counts the queued turns cancelled.
 func (l *Log) Stop(ns, thread, by string) (stoppedRunning bool, cancelled int, err error) {
@@ -416,6 +420,9 @@ func (l *Log) Stop(ns, thread, by string) (stoppedRunning bool, cancelled int, e
 				stoppedRunning = true
 				if !t.StopRequested {
 					t.StopRequested, t.StoppedBy = true, by
+					changed = true
+				}
+				if expireOpen(t.Questions, "", AnsweredByStop, now) {
 					changed = true
 				}
 			case v1alpha1.TurnStateQueued:
@@ -433,7 +440,7 @@ func (l *Log) Stop(ns, thread, by string) (stoppedRunning bool, cancelled int, e
 }
 
 // Requeue puts the turns running for a dead session back in the queue, clearing
-// Session and StartedAt, so the next sitting redoes them, and returns how many.
+// Session, StartedAt and Questions, so the next sitting redoes them, and returns how many.
 // A turn whose stop was requested is failed as "stopped by <StoppedBy>" instead
 // of being redone, and is not counted.
 func (l *Log) Requeue(ns, thread, session string) (int, error) {
@@ -451,7 +458,7 @@ func (l *Log) Requeue(ns, thread, session string) (int, error) {
 				t.State, t.Error, t.CompletedAt = v1alpha1.TurnStateFailed, "stopped by "+t.StoppedBy, &now
 				continue
 			}
-			t.State, t.Session, t.StartedAt = v1alpha1.TurnStateQueued, "", nil
+			t.State, t.Session, t.StartedAt, t.Questions = v1alpha1.TurnStateQueued, "", nil, nil
 			n++
 		}
 		return changed, nil

@@ -52,9 +52,11 @@ pre{background:var(--card);border:1px solid var(--line);padding:.6rem .8rem;marg
 code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
 .b{display:inline-block;padding:0 .45rem;border-radius:.7rem;border:1px solid var(--line);font-size:.85em;white-space:nowrap}
 .True,.ok,.fixed,.Succeeded,.done{color:var(--ok)}
-.needs_owner,.inconclusive,.Pending,.Running,.Unknown,.Working,.queued,.running{color:var(--warn)}
+.needs_owner,.inconclusive,.Pending,.Running,.Unknown,.Working,.Waiting,.queued,.running{color:var(--warn)}
 .False,.failed,.Failed,.cancelled{color:var(--bad)}
 ul{margin:.2rem 0;padding-left:1.2rem}
+.ask{border:1px solid var(--warn);border-left-width:.35rem;background:var(--card);padding:.6rem .8rem}
+tr.pending td{background:color-mix(in srgb,var(--warn) 12%,var(--card))}
 @media (max-width:40rem){dl{grid-template-columns:1fr}dt{margin-top:.4rem}}
 </style>
 </head>
@@ -228,6 +230,14 @@ const threadTmpl = `{{define "body"}}
 {{if .ActiveSession}}<dt>Active sitting</dt><dd><a href="{{.ActiveLink}}">{{.ActiveSession}}</a></dd>{{end}}
 {{if .Conditions}}<dt>Conditions</dt><dd>{{template "list" .Conditions}}</dd>{{end}}
 </dl>
+{{if .Pending}}<h2>Waiting for your answer</h2>
+<div class="ask">
+<p><strong>Turn {{.Pending.Turn}}, question {{.Pending.ID}}</strong>{{if .Pending.Header}} &middot; {{.Pending.Header}}{{end}}{{if gt .Pending.Remaining 1}} <span class="muted">({{.Pending.Remaining}} questions in this ask are open)</span>{{end}}</p>
+<pre>{{.Pending.Text}}</pre>
+{{if .Pending.Options}}<ul>{{range .Pending.Options}}<li><strong>{{.Label}}</strong>{{if .Recommended}} <span class="muted">(recommended)</span>{{end}}{{if .Description}} <span class="muted">&mdash; {{.Description}}</span>{{end}}</li>{{end}}</ul>{{end}}
+<p class="muted">Answer with <code>{{.AnswerHint}}</code>. Without an answer the agent is told to continue with its best judgment.</p>
+</div>
+{{end}}
 <h2>Result</h2>
 {{if .Result}}<dl>
 <dt>Head</dt><dd><code>{{.Result.Head}}</code></dd>
@@ -241,6 +251,13 @@ const threadTmpl = `{{define "body"}}
 <tbody>
 {{range .Turns}}<tr><td>{{.ID}}</td><td><span class="{{.State}}">{{.State}}</span></td><td><pre>{{.Text}}</pre></td><td>{{.Title}}</td><td>{{if .Reply}}<pre>{{.Reply}}</pre>{{end}}</td><td>{{.Error}}</td><td>{{.Usage}}{{if .Head}}<br><code>{{.Head}}</code>{{end}}{{if .Push}}<br>{{.Push}}{{end}}</td></tr>
 {{end}}</tbody></table></div>{{else}}<p class="muted">No turns.</p>{{end}}
+{{if .Questions}}<h2>Questions</h2>
+<div class="scroll"><table>
+<thead><tr><th>Turn</th><th>#</th><th>Question</th><th>Status</th><th>Answer</th></tr></thead>
+<tbody>
+{{range .Questions}}<tr{{if .Pending}} class="pending"{{end}}><td>{{.Turn}}</td><td>{{.ID}}</td><td>{{if .Header}}<strong>{{.Header}}</strong><br>{{end}}<pre>{{.Text}}</pre>{{if .Options}}<ul>{{range .Options}}<li>{{.Label}}{{if .Recommended}} <span class="muted">(recommended)</span>{{end}}{{if .Description}} <span class="muted">&mdash; {{.Description}}</span>{{end}}</li>{{end}}</ul>{{end}}</td><td><span class="{{if .Waiting}}Waiting{{else if .Expired}}cancelled{{else}}done{{end}}">{{.Status}}</span><br><span class="muted" title="{{.Asked}}">asked {{.Asked}}</span></td><td>{{if .Selected}}<strong>{{.Selected}}</strong>{{end}}{{if .Free}}<pre>{{.Free}}</pre>{{end}}{{if .By}}<span class="muted">by {{.By}}{{if .Answered}} at {{.Answered}}{{end}}</span>{{else if .Answered}}<span class="muted">at {{.Answered}}</span>{{end}}</td></tr>
+{{end}}</tbody></table></div>
+{{end}}
 {{if .EventsSession}}<h2>Events</h2>
 <p class="muted">Newest sitting: <a href="{{.EventsLink}}">{{.EventsSession}}</a></p>
 {{if .Events}}<div class="scroll"><table>

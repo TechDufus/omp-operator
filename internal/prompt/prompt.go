@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+	"time"
 	"unicode/utf8"
 )
 
@@ -241,6 +242,18 @@ func SystemPrompt(instructions string, creds []Credential, tools []Tool) string 
 	return strings.Join(parts, "\n\n")
 }
 
+// FormatDuration renders d the short way the operator's durations are written: 30m, 1h, 1h30m, 45s.
+func FormatDuration(d time.Duration) string {
+	s := d.Round(time.Second).String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
+}
+
 // Cloud describes a cloud thread sitting for the "Running in the cloud" section.
 type Cloud struct {
 	// Repo is the repository's display name.
@@ -255,6 +268,8 @@ type Cloud struct {
 	Push bool
 	// SecretFiles are the shipped secret files, workspace-relative.
 	SecretFiles []string
+	// QuestionTimeout is how long an unanswered question waits before the agent is told to continue on its own.
+	QuestionTimeout time.Duration
 }
 
 // CloudSection returns the "Running in the cloud" section of a thread sitting.
@@ -267,7 +282,14 @@ func CloudSection(c Cloud) string {
 		fmt.Fprintf(&b, ", based on %s", c.LocalBranch)
 	}
 	b.WriteString(".\n")
-	b.WriteString("- Work autonomously: nobody watches live. When you need a decision, end your turn and ask in your reply.\n")
+	b.WriteString("- Work autonomously: nobody watches live. When a decision blocks the work, use the `ask` tool: the user " +
+		"may answer late, so settle everything the question does not block first. ")
+	if c.QuestionTimeout > 0 {
+		fmt.Fprintf(&b, "If nobody answers within %s you get a note to proceed with your best judgment; ", FormatDuration(c.QuestionTimeout))
+	} else {
+		b.WriteString("If nobody answers in time you get a note to proceed with your best judgment; ")
+	}
+	b.WriteString("say in your reply what you assumed. Do not ask about things you can decide yourself.\n")
 	push := "the user pulls the branch from the operator"
 	if c.Push {
 		push = "the branch is pushed for you after each turn"

@@ -151,6 +151,12 @@ spec:
                       default: 4h
                       description: 'maxSitting bounds one sitting: it takes no turn that could end past this, and the next message starts a new pod.'
                       type: string
+                    questionTimeout:
+                      default: 30m
+                      description: |-
+                        questionTimeout is how long a cloud agent waits for the answer to a question it asked (omp's ask tool)
+                        before it is told to continue with its best judgment.
+                      type: string
                     threadRetention:
                       default: 168h
                       description: threadRetention is how long an idle thread is kept after its last activity.

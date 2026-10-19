@@ -268,11 +268,38 @@ spec:
                   format: int64
                   type: integer
                 phase:
-                  description: phase is Working while a turn is queued or running, else Idle.
+                  description: |-
+                    phase is Waiting while the running turn has an unanswered question, else Working while a turn is queued or
+                    running, else Idle.
                   enum:
                     - Working
+                    - Waiting
                     - Idle
                   type: string
+                question:
+                  description: question is the oldest unanswered question of the running turn.
+                  properties:
+                    askedAt:
+                      description: askedAt is when the question was asked.
+                      format: date-time
+                      type: string
+                    id:
+                      description: id is the question number within the turn.
+                      format: int32
+                      type: integer
+                    text:
+                      description: text is the question, cut to 1000 characters.
+                      maxLength: 1000
+                      type: string
+                    turn:
+                      description: turn is the turn that asked.
+                      format: int32
+                      type: integer
+                  required:
+                    - askedAt
+                    - id
+                    - turn
+                  type: object
                 queued:
                   description: queued is the number of turns waiting for a sitting.
                   format: int32

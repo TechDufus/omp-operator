@@ -30,6 +30,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,9 +57,12 @@ const (
 	maxEvents = 500
 	// maxMessageBodyBytes bounds the JSON body of a message: its text plus the envelope.
 	maxMessageBodyBytes = threads.MaxTextBytes + 4<<10
+	// maxAnswerBodyBytes bounds the JSON body of an answer: the free text, the selected labels and the envelope.
+	maxAnswerBodyBytes = threads.MaxQuestionTextBytes + threads.MaxOptions*(threads.MaxOptionLabelBytes+16) + 4<<10
 
 	messageThreadFull = "thread has 200 turns; start a new one"
 	messageDeleting   = "thread is being deleted"
+	messageNotWaiting = "question is not waiting for an answer"
 )
 
 var log = logf.Log.WithName("cloudapi")
@@ -110,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/namespaces/{ns}/threads/{name}/events", s.handleEvents)
 	mux.HandleFunc("POST /api/v1/namespaces/{ns}/threads/{name}/messages", s.handleMessage)
 	mux.HandleFunc("POST /api/v1/namespaces/{ns}/threads/{name}/stop", s.handleStop)
+	mux.HandleFunc("POST /api/v1/namespaces/{ns}/threads/{name}/turns/{turn}/questions/{qid}/answer", s.handleAnswer)
 	mux.HandleFunc("GET /api/v1/namespaces/{ns}/threads/{name}/result", s.handleResult)
 	mux.HandleFunc("GET /api/v1/namespaces/{ns}/threads/{name}/conversation", s.handleConversation)
 	mux.HandleFunc("DELETE /api/v1/namespaces/{ns}/threads/{name}", s.handleDelete)
@@ -200,21 +205,83 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := WhoAmI{User: p, Agents: []AgentInfo{}}
+	var infos []*v1alpha1.OmpAgent
 	for i := range agents.Items {
 		a := &agents.Items[i]
 		if a.Spec.Cloud == nil || !s.nsServed(a.Namespace) || !s.Access.Allows(p, nil, a.Namespace, dashboard.RoleOperator) {
 			continue
 		}
-		out.Agents = append(out.Agents, s.agentInfo(a))
+		infos = append(infos, a)
+	}
+	if len(infos) > 0 {
+		load, err := s.agentLoads(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		for _, a := range infos {
+			info := s.agentInfo(a)
+			l := load[agentKey{a.Namespace, a.Name}]
+			info.Capacity.Running, info.Threads = l.running, l.threads
+			out.Agents = append(out.Agents, info)
+		}
 	}
 	slices.SortFunc(out.Agents, func(a, b AgentInfo) int { return strings.Compare(a.Namespace+"/"+a.Name, b.Namespace+"/"+b.Name) })
 	writeJSON(w, http.StatusOK, out)
+}
+
+type agentKey struct{ ns, name string }
+
+// agentLoad is what runs on an agent now.
+type agentLoad struct {
+	running int // sessions in phase Running
+	threads ThreadCounts
+}
+
+// agentLoads counts the Running sessions and the threads by phase of every agent. A thread
+// that no reconcile has given a phase yet has a queued first turn: it counts as working.
+func (s *Server) agentLoads(ctx context.Context) (map[agentKey]agentLoad, error) {
+	var sessions v1alpha1.OmpSessionList
+	if err := s.Client.List(ctx, &sessions); err != nil {
+		return nil, err
+	}
+	var ths v1alpha1.OmpThreadList
+	if err := s.Client.List(ctx, &ths); err != nil {
+		return nil, err
+	}
+	load := map[agentKey]agentLoad{}
+	for i := range sessions.Items {
+		sess := &sessions.Items[i]
+		if sess.Status.Phase != v1alpha1.SessionPhaseRunning {
+			continue
+		}
+		k := agentKey{sess.Namespace, sess.Spec.AgentRef.Name}
+		l := load[k]
+		l.running++
+		load[k] = l
+	}
+	for i := range ths.Items {
+		t := &ths.Items[i]
+		k := agentKey{t.Namespace, t.Spec.AgentRef.Name}
+		l := load[k]
+		switch t.Status.Phase {
+		case v1alpha1.ThreadPhaseIdle:
+			l.threads.Idle++
+		case v1alpha1.ThreadPhaseWaiting:
+			l.threads.Waiting++
+		default:
+			l.threads.Working++
+		}
+		load[k] = l
+	}
+	return load, nil
 }
 
 func (s *Server) agentInfo(a *v1alpha1.OmpAgent) AgentInfo {
 	info := AgentInfo{
 		Namespace: a.Namespace, Name: a.Name, Ready: meta.IsStatusConditionTrue(a.Status.Conditions, v1alpha1.ConditionReady),
 		DefaultModel: a.Spec.Model.Default, ModelPatterns: modelPatterns(a), GitHosts: []string{}, MaxUploadBytes: s.maxUpload(),
+		Capacity: Capacity{MaxConcurrentSessions: max(1, int(a.Spec.Limits.MaxConcurrentSessions))},
 	}
 	for _, g := range a.Spec.Cloud.Git {
 		info.GitHosts = append(info.GitHosts, g.Host)
@@ -268,7 +335,16 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		if len(out) == listThreads {
 			break
 		}
-		out = append(out, s.summary(&list.Items[i]))
+		t := &list.Items[i]
+		var turns []threads.Turn
+		if t.Status.Phase != v1alpha1.ThreadPhaseIdle {
+			var err error
+			if turns, err = s.Threads.Turns(t.Namespace, t.Name); err != nil {
+				writeError(w, err)
+				return
+			}
+		}
+		out = append(out, s.summary(t, turns))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"threads": out})
 }
@@ -374,6 +450,45 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Threads.Signal(t.Namespace, t.Name)
 	writeJSON(w, http.StatusOK, map[string]any{"stoppedRunning": stopped, "cancelled": cancelled})
+}
+
+func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
+	t, err := s.thread(r, dashboard.RoleOperator)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	turn, err1 := strconv.Atoi(r.PathValue("turn"))
+	qid, err2 := strconv.Atoi(r.PathValue("qid"))
+	if err1 != nil || err2 != nil || turn < 1 || qid < 1 {
+		writeError(w, errNotFound)
+		return
+	}
+	var body struct {
+		Selected []string `json:"selected"`
+		Answer   string   `json:"answer"`
+	}
+	if err := decodeJSON(w, r, maxAnswerBodyBytes, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	q, err := s.Threads.Answer(t.Namespace, t.Name, turn, qid, body.Selected, body.Answer, principalOf(r))
+	switch {
+	case errors.Is(err, threads.ErrQuestionNotFound):
+		writeError(w, errNotFound)
+		return
+	case errors.Is(err, threads.ErrNotWaiting):
+		writeError(w, fail(http.StatusConflict, messageNotWaiting))
+		return
+	case errors.Is(err, threads.ErrInvalidAnswer):
+		writeError(w, fail(http.StatusBadRequest, err.Error()))
+		return
+	case err != nil:
+		writeError(w, err)
+		return
+	}
+	s.Threads.Signal(t.Namespace, t.Name)
+	writeJSON(w, http.StatusOK, q)
 }
 
 func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {

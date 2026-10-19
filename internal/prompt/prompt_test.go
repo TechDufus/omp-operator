@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -280,6 +281,49 @@ func TestTitleFromReply(t *testing.T) {
 			}
 			if n := utf8.RuneCountInString(got); n > 80 {
 				t.Errorf("%d runes, want at most 80", n)
+			}
+		})
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		in   time.Duration
+		want string
+	}{
+		{30 * time.Minute, "30m"},
+		{time.Hour, "1h"},
+		{90 * time.Minute, "1h30m"},
+		{10 * time.Minute, "10m"},
+		{45 * time.Second, "45s"},
+		{24 * time.Hour, "24h"},
+	}
+	for _, tt := range tests {
+		if got := FormatDuration(tt.in); got != tt.want {
+			t.Errorf("FormatDuration(%v) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestCloudSectionQuestions(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		want    string
+	}{
+		{"timeout named", 45 * time.Minute, "If nobody answers within 45m you get a note to proceed with your best judgment;"},
+		{"timeout unset", 0, "If nobody answers in time you get a note to proceed with your best judgment;"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CloudSection(Cloud{Repo: "app", Workspace: "/w", Branch: "omp-cloud/x", QuestionTimeout: tt.timeout})
+			for _, want := range []string{"use the `ask` tool", tt.want, "say in your reply what you assumed"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("section lacks %q:\n%s", want, got)
+				}
+			}
+			if strings.Contains(got, "end your turn and ask in your reply") {
+				t.Errorf("section still carries the old guidance:\n%s", got)
 			}
 		})
 	}

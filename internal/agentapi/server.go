@@ -99,6 +99,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+sess+"/thread/next", s.threadSession(s.handleThreadNext))
 	mux.HandleFunc("GET "+sess+"/thread/control", s.threadSession(s.handleThreadControl))
 	mux.HandleFunc("POST "+sess+"/thread/turns/{id}/complete", s.threadSession(s.handleThreadTurnComplete))
+	mux.HandleFunc("POST "+sess+"/thread/turns/{id}/asks", s.threadSession(s.handleThreadAsk))
+	mux.HandleFunc("GET "+sess+"/thread/turns/{id}/asks/{ask}", s.threadSession(s.handleThreadAskState))
+	mux.HandleFunc("POST "+sess+"/thread/turns/{id}/asks/{ask}/expire", s.threadSession(s.handleThreadAskExpire))
 	mux.HandleFunc("GET "+sess+"/toolchains/{hash}", s.threadSession(s.handleGetCloudToolchain))
 	mux.HandleFunc("PUT "+sess+"/toolchains/{hash}", s.threadSession(s.handlePutCloudToolchain))
 

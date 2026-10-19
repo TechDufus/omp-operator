@@ -53,6 +53,7 @@ func TestThreadStatusFromTurns(t *testing.T) {
 		wantLatest int32 // 0: none
 		wantHead   string
 		wantLast   time.Time
+		wantAsking int32 // id of the pending question; 0: none
 	}{
 		{
 			name:      "no turns is Idle since creation",
@@ -84,6 +85,36 @@ func TestThreadStatusFromTurns(t *testing.T) {
 			},
 			wantPhase: ompv1alpha1.ThreadPhaseIdle, wantLatest: 1, wantLast: t0.Add(2 * time.Minute),
 		},
+		{
+			name: "a running turn with an unanswered question is Waiting, and beats a queued turn",
+			turns: []threads.Turn{
+				{ID: 1, State: ompv1alpha1.TurnStateRunning, QueuedAt: t0, StartedAt: at(time.Second), Questions: []threads.Question{
+					{ID: 1, Ask: 1, Text: "first?", AskedAt: t0, AnsweredAt: at(5 * time.Second)},
+					{ID: 2, Ask: 2, Text: "second?", AskedAt: t0.Add(10 * time.Second)},
+					{ID: 3, Ask: 2, Text: "third?", AskedAt: t0.Add(10 * time.Second)},
+				}},
+				{ID: 2, State: ompv1alpha1.TurnStateQueued, QueuedAt: *at(20 * time.Second)},
+			},
+			wantPhase: ompv1alpha1.ThreadPhaseWaiting, wantQueued: 1, wantLast: t0.Add(20 * time.Second), wantAsking: 2,
+		},
+		{
+			name: "an answered question leaves the turn Working",
+			turns: []threads.Turn{
+				{ID: 1, State: ompv1alpha1.TurnStateRunning, QueuedAt: t0, StartedAt: at(time.Second), Questions: []threads.Question{
+					{ID: 1, Ask: 1, Text: "first?", AskedAt: t0, AnsweredAt: at(5 * time.Second)},
+				}},
+			},
+			wantPhase: ompv1alpha1.ThreadPhaseWorking, wantLast: t0.Add(time.Second),
+		},
+		{
+			name: "an unanswered question of a finished turn does not make the thread Waiting",
+			turns: []threads.Turn{
+				{ID: 1, State: ompv1alpha1.TurnStateFailed, QueuedAt: t0, CompletedAt: at(time.Minute), Questions: []threads.Question{
+					{ID: 1, Ask: 1, Text: "first?", AskedAt: t0},
+				}},
+			},
+			wantPhase: ompv1alpha1.ThreadPhaseIdle, wantLatest: 1, wantLast: t0.Add(time.Minute),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -101,6 +132,10 @@ func TestThreadStatusFromTurns(t *testing.T) {
 			if !st.lastActivity.Equal(tt.wantLast) {
 				t.Errorf("lastActivity = %v, want %v", st.lastActivity, tt.wantLast)
 			}
+			if (st.question == nil) != (tt.wantAsking == 0) || (st.question != nil && (st.question.ID != tt.wantAsking ||
+				st.question.Turn != 1 || st.question.Text != "second?" || st.question.AskedAt.IsZero())) {
+				t.Errorf("question = %+v, want id %d", st.question, tt.wantAsking)
+			}
 		})
 	}
 }
@@ -113,6 +148,16 @@ func TestThreadStatusTruncatesSummary(t *testing.T) {
 	l := threadStatus(threadFixture(), turns, "").latest
 	if len(l.Title) > 80 || len(l.Reply) > 3000 || len(l.Error) > 1000 {
 		t.Errorf("summary lengths = %d %d %d", len(l.Title), len(l.Reply), len(l.Error))
+	}
+}
+
+func TestThreadStatusQuestionTextIsCut(t *testing.T) {
+	turns := []threads.Turn{{
+		ID: 1, State: ompv1alpha1.TurnStateRunning, QueuedAt: time.Now(),
+		Questions: []threads.Question{{ID: 1, Ask: 1, Text: strings.Repeat("q", 4000), AskedAt: time.Now()}},
+	}}
+	if q := threadStatus(threadFixture(), turns, "").question; q == nil || len(q.Text) > 1000 {
+		t.Errorf("question = %+v", q)
 	}
 }
 
@@ -148,6 +193,36 @@ func TestApplyThreadStatusIsIdempotent(t *testing.T) {
 	st.queued, st.phase = 1, ompv1alpha1.ThreadPhaseWorking
 	if !applyThreadStatus(stored, st) {
 		t.Error("a changed status reported no change")
+	}
+}
+
+// The pending question is part of the status: a change shows, an unchanged one does not.
+func TestApplyThreadStatusQuestion(t *testing.T) {
+	th := threadFixture()
+	now := time.Date(2026, 10, 18, 10, 0, 0, 987654321, time.UTC)
+	turn := threads.Turn{ID: 1, State: ompv1alpha1.TurnStateRunning, QueuedAt: now, Questions: []threads.Question{
+		{ID: 1, Ask: 1, Text: "which?", AskedAt: now},
+	}}
+	st := threadStatus(th, []threads.Turn{turn}, "coder-k3x9fa-1")
+	if !applyThreadStatus(th, st) || th.Status.Phase != ompv1alpha1.ThreadPhaseWaiting || th.Status.Question == nil || th.Status.Question.Text != "which?" {
+		t.Fatalf("status = %+v", th.Status)
+	}
+	stored := &ompv1alpha1.OmpThread{}
+	raw, err := json.Marshal(th)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, stored); err != nil {
+		t.Fatal(err)
+	}
+	if applyThreadStatus(stored, st) {
+		t.Errorf("an unchanged question reported a change: %+v", stored.Status)
+	}
+	answered := now.Add(time.Second)
+	turn.Questions = []threads.Question{{ID: 1, Ask: 1, Text: "which?", AskedAt: now, AnsweredAt: &answered}}
+	if !applyThreadStatus(stored, threadStatus(th, []threads.Turn{turn}, "coder-k3x9fa-1")) || stored.Status.Question != nil ||
+		stored.Status.Phase != ompv1alpha1.ThreadPhaseWorking {
+		t.Errorf("after the answer: %+v", stored.Status)
 	}
 }
 

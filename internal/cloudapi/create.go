@@ -159,7 +159,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	sum := s.summary(t)
+	sum := s.summary(t, nil)
 	sum.Phase, sum.Turns, sum.Queued, sum.Warnings = v1alpha1.ThreadPhaseWorking, 1, 1, nt.warnings
 	writeJSON(w, http.StatusCreated, sum)
 }

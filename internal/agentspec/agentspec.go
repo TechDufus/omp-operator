@@ -69,6 +69,8 @@ const (
 	minMaxSitting      = 10 * time.Minute
 	maxMaxSitting      = 24 * time.Hour
 	minThreadRetention = time.Hour
+	minQuestionTimeout = time.Minute
+	maxQuestionTimeout = 24 * time.Hour
 )
 
 var cloudHostPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
@@ -204,6 +206,9 @@ func validateCloud(c *ompv1alpha1.CloudSpec) *Problem {
 	}
 	if d := c.ThreadRetention.Duration; d != 0 && d < minThreadRetention {
 		return invalidSpec("cloud.threadRetention %s must be at least %s", d, minThreadRetention)
+	}
+	if d := c.QuestionTimeout.Duration; d != 0 && (d < minQuestionTimeout || d > maxQuestionTimeout) {
+		return invalidSpec("cloud.questionTimeout %s must be between %s and %s", d, minQuestionTimeout, maxQuestionTimeout)
 	}
 	seen := map[string]bool{}
 	for i := range c.Git {

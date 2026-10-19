@@ -128,7 +128,8 @@ type OmpThreadStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// phase is Working while a turn is queued or running, else Idle.
+	// phase is Waiting while the running turn has an unanswered question, else Working while a turn is queued or
+	// running, else Idle.
 	// +optional
 	Phase ThreadPhase `json:"phase,omitempty"`
 
@@ -151,6 +152,10 @@ type OmpThreadStatus struct {
 	// result is the newest result branch state.
 	// +optional
 	Result *ThreadResult `json:"result,omitempty"`
+
+	// question is the oldest unanswered question of the running turn.
+	// +optional
+	Question *ThreadQuestion `json:"question,omitempty"`
 
 	// lastActivityAt is the latest of the thread's creation and turn timestamps.
 	// +optional
@@ -191,6 +196,26 @@ type ThreadTurnSummary struct {
 	// completedAt is when the turn finished.
 	// +optional
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+}
+
+// ThreadQuestion is a question the cloud agent asked and nobody answered yet.
+type ThreadQuestion struct {
+	// turn is the turn that asked.
+	// +required
+	Turn int32 `json:"turn"`
+
+	// id is the question number within the turn.
+	// +required
+	ID int32 `json:"id"`
+
+	// text is the question, cut to 1000 characters.
+	// +kubebuilder:validation:MaxLength=1000
+	// +optional
+	Text string `json:"text,omitempty"`
+
+	// askedAt is when the question was asked.
+	// +required
+	AskedAt metav1.Time `json:"askedAt"`
 }
 
 // ThreadResult is the state of the result branch omp-cloud/<thread>.

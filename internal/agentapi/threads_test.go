@@ -109,6 +109,9 @@ func TestThreadRoutesAreForThreadSittingsOnly(t *testing.T) {
 		{http.MethodGet, "/thread/next?wait=1"},
 		{http.MethodGet, "/thread/control"},
 		{http.MethodPost, "/thread/turns/1/complete"},
+		{http.MethodPost, "/thread/turns/1/asks"},
+		{http.MethodGet, "/thread/turns/1/asks/1?wait=1"},
+		{http.MethodPost, "/thread/turns/1/asks/1/expire"},
 		{http.MethodGet, "/toolchains/abc"},
 		{http.MethodPut, "/toolchains/abc"},
 	} {
@@ -225,7 +228,7 @@ func TestThreadConfig(t *testing.T) {
 	wantThread := ThreadConfig{
 		Name: threadName, Branch: "omp-cloud/" + threadName, BaseCommit: th.Spec.Repo.BaseCommit,
 		RepoName: "app", LocalBranch: "feature/x", Thinking: "high",
-		TurnTimeoutSeconds: 45 * 60, IdleTimeoutSeconds: 600, MaxSittingSeconds: 4 * 3600, Push: true,
+		TurnTimeoutSeconds: 45 * 60, IdleTimeoutSeconds: 600, MaxSittingSeconds: 4 * 3600, QuestionTimeoutSeconds: 1800, Push: true,
 	}
 	if cfg.Thread == nil || *cfg.Thread != wantThread {
 		t.Errorf("thread config = %+v, want %+v", cfg.Thread, wantThread)
@@ -357,6 +360,132 @@ func TestThreadTurnLifecycle(t *testing.T) {
 	// Nothing left: 204.
 	expect(t, e.do(http.MethodGet, sessPrefix+"/thread/next", sittingToken, nil), 204)
 	expect(t, e.do(http.MethodGet, sessPrefix+"/thread/next?wait=abc", sittingToken, nil), 400)
+}
+
+// runningThreadTurn enqueues a turn and hands it to the sitting.
+func runningThreadTurn(t *testing.T, e *env) {
+	t.Helper()
+	if _, err := e.srv.Threads.Enqueue(ns, threadName, "work", "token:dev"); err != nil {
+		t.Fatal(err)
+	}
+	expect(t, e.do(http.MethodGet, sessPrefix+"/thread/next", sittingToken, nil), 200)
+}
+
+func TestThreadAskLifecycle(t *testing.T) {
+	e := threadEnv(t, threadObj(nil), cloudAgentObj(nil))
+	log := e.srv.Threads
+	runningThreadTurn(t, e)
+	rec := 1
+	req := AskRequest{Questions: []AskQuestion{
+		{Key: "db", Text: "Which database?", Header: "DB", Multi: false, Recommended: &rec,
+			Options: []QuestionOption{{Label: "sqlite", Description: "embedded"}, {Label: "postgres"}}},
+		{Key: "why", Text: "Why?"},
+	}}
+	for len(log.Events()) > 0 {
+		<-log.Events()
+	}
+	r := e.do(http.MethodPost, sessPrefix+"/thread/turns/1/asks", sittingToken, req)
+	expect(t, r, 201)
+	st := decode[AskState](t, r)
+	if st.Ask != 1 || st.Done || len(st.Questions) != 2 || st.Questions[0].ID != 1 || st.Questions[1].ID != 2 ||
+		st.Questions[0].Key != "db" || st.Questions[0].Header != "DB" || st.Questions[0].AskedAt.IsZero() ||
+		*st.Questions[0].Recommended != 1 || len(st.Questions[0].Options) != 2 || st.Questions[0].Options[0].Description != "embedded" {
+		t.Fatalf("ask state = %+v", st)
+	}
+	select {
+	case ev := <-log.Events():
+		if ev.Object.GetName() != threadName {
+			t.Errorf("event for %s", ev.Object.GetName())
+		}
+	default:
+		t.Error("asking must wake the thread reconciler")
+	}
+
+	// Unanswered: the long poll answers 204.
+	expect(t, e.do(http.MethodGet, sessPrefix+"/thread/turns/1/asks/1", sittingToken, nil), 204)
+
+	if _, err := log.Answer(ns, threadName, 1, 1, []string{"sqlite"}, "", "token:dev"); err != nil {
+		t.Fatal(err)
+	}
+	expect(t, e.do(http.MethodGet, sessPrefix+"/thread/turns/1/asks/1", sittingToken, nil), 204)
+	if _, err := log.Answer(ns, threadName, 1, 2, nil, "because", "token:dev"); err != nil {
+		t.Fatal(err)
+	}
+	r = e.do(http.MethodGet, sessPrefix+"/thread/turns/1/asks/1?wait=1", sittingToken, nil)
+	expect(t, r, 200)
+	st = decode[AskState](t, r)
+	if !st.Done || st.Questions[0].Selected[0] != "sqlite" || st.Questions[1].Answer != "because" || st.Questions[0].AnsweredBy != "token:dev" ||
+		st.Questions[0].AnsweredAt == nil {
+		t.Errorf("answered state = %+v", st)
+	}
+}
+
+func TestThreadAskExpire(t *testing.T) {
+	e := threadEnv(t, threadObj(nil), cloudAgentObj(nil))
+	log := e.srv.Threads
+	runningThreadTurn(t, e)
+	expect(t, e.do(http.MethodPost, sessPrefix+"/thread/turns/1/asks", sittingToken,
+		AskRequest{Questions: []AskQuestion{{Key: "a", Text: "a?"}, {Key: "b", Text: "b?"}}}), 201)
+	if _, err := log.Answer(ns, threadName, 1, 1, nil, "mine", "token:dev"); err != nil {
+		t.Fatal(err)
+	}
+	for len(log.Events()) > 0 {
+		<-log.Events()
+	}
+	r := e.do(http.MethodPost, sessPrefix+"/thread/turns/1/asks/1/expire", sittingToken, AskExpire{Answer: "carry on"})
+	expect(t, r, 200)
+	st := decode[AskState](t, r)
+	if !st.Done || st.Questions[0].Expired || st.Questions[0].Answer != "mine" ||
+		!st.Questions[1].Expired || st.Questions[1].Answer != "carry on" || st.Questions[1].AnsweredBy != "timeout" {
+		t.Errorf("expired state = %+v", st)
+	}
+	if len(log.Events()) == 0 {
+		t.Error("expiring must wake the thread reconciler")
+	}
+	expect(t, e.do(http.MethodGet, sessPrefix+"/thread/turns/1/asks/1", sittingToken, nil), 200)
+}
+
+func TestThreadAskErrors(t *testing.T) {
+	e := threadEnv(t, threadObj(nil), cloudAgentObj(nil))
+	one := AskRequest{Questions: []AskQuestion{{Key: "a", Text: "a?"}}}
+
+	// No turn is running yet.
+	expect(t, e.do(http.MethodPost, sessPrefix+"/thread/turns/1/asks", sittingToken, one), 409)
+	runningThreadTurn(t, e)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   any
+		want   int
+	}{
+		{"ask without questions", http.MethodPost, "/thread/turns/1/asks", AskRequest{}, 400},
+		{"ask with empty text", http.MethodPost, "/thread/turns/1/asks", AskRequest{Questions: []AskQuestion{{Key: "a", Text: ""}}}, 400},
+		{"ask with duplicate options", http.MethodPost, "/thread/turns/1/asks", AskRequest{Questions: []AskQuestion{
+			{Key: "a", Text: "a?", Options: []QuestionOption{{Label: "x"}, {Label: "x"}}}}}, 400},
+		{"ask on another turn", http.MethodPost, "/thread/turns/2/asks", one, 409},
+		{"bad turn id", http.MethodPost, "/thread/turns/zero/asks", one, 400},
+		{"bad ask number", http.MethodGet, "/thread/turns/1/asks/zero", nil, 400},
+		{"bad wait", http.MethodGet, "/thread/turns/1/asks/1?wait=abc", nil, 400},
+		{"unknown ask", http.MethodGet, "/thread/turns/1/asks/5?wait=1", nil, 404},
+		{"unknown turn", http.MethodGet, "/thread/turns/9/asks/1", nil, 404},
+		{"expire unknown ask", http.MethodPost, "/thread/turns/1/asks/5/expire", AskExpire{Answer: "x"}, 404},
+		{"expire bad body", http.MethodPost, "/thread/turns/1/asks/1/expire", "{", 400},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expect(t, e.do(tt.method, sessPrefix+tt.path, sittingToken, tt.body), tt.want)
+		})
+	}
+
+	// An ask made by the running turn is not readable once the turn is requeued for another sitting.
+	expect(t, e.do(http.MethodPost, sessPrefix+"/thread/turns/1/asks", sittingToken, one), 201)
+	if _, err := e.srv.Threads.Requeue(ns, threadName, sitting); err != nil {
+		t.Fatal(err)
+	}
+	expect(t, e.do(http.MethodGet, sessPrefix+"/thread/turns/1/asks/1", sittingToken, nil), 409)
+	expect(t, e.do(http.MethodPost, sessPrefix+"/thread/turns/1/asks", sittingToken, one), 409)
 }
 
 func TestThreadTurnCompleteTruncatesAndSignals(t *testing.T) {

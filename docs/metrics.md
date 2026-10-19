@@ -17,7 +17,7 @@ The chart ships no ServiceMonitor or scrape annotation; add your own, and restri
 | `omp_operator_model_auth_failures_total` | counter | `namespace`, `agent` | Session attempts that ended because the model rejected authentication |
 | `omp_operator_notifications_total` | counter | `type`, `result` | Notification deliveries by sink type (`ntfy`, `slack`, `discord`, `webhook`) and final result (`ok`, `error`) |
 | `omp_operator_thread_turns_total` | counter | `namespace`, `agent`, `state` | Finished cloud thread turns, counted once each when their notification is recorded. `state` is `done`, `failed` or `cancelled` |
-| `omp_operator_threads` | gauge | `namespace`, `agent`, `phase` | Cloud threads in each phase (`Working`, `Idle`) |
+| `omp_operator_threads` | gauge | `namespace`, `agent`, `phase` | Cloud threads in each phase (`Working`, `Waiting`, `Idle`) |
 | `omp_operator_data_free_bytes` | gauge | | Free bytes on the data volume, sampled every 60 seconds |
 | `omp_operator_data_capacity_bytes` | gauge | | Capacity of the data volume |
 | `omp_operator_build_info` | gauge | `version` | Always 1; the operator version |

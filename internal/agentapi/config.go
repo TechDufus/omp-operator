@@ -108,12 +108,13 @@ func applyThread(cfg *SessionConfig, agent *v1alpha1.OmpAgent, thread *v1alpha1.
 	push := host != nil && host.Push
 
 	cfg.SystemPrompt = joinSections(cfg.SystemPrompt, prompt.CloudSection(prompt.Cloud{
-		Repo:        thread.Spec.Repo.Name,
-		Workspace:   workspace,
-		Branch:      cloudspec.Branch(thread.Name),
-		LocalBranch: thread.Spec.Repo.LocalBranch,
-		Push:        push,
-		SecretFiles: thread.Spec.SecretFiles,
+		Repo:            thread.Spec.Repo.Name,
+		Workspace:       workspace,
+		Branch:          cloudspec.Branch(thread.Name),
+		LocalBranch:     thread.Spec.Repo.LocalBranch,
+		Push:            push,
+		SecretFiles:     thread.Spec.SecretFiles,
+		QuestionTimeout: cloudspec.QuestionTimeout(&cloud),
 	}))
 	for _, name := range thread.Spec.SecretEnv {
 		cfg.Redact = append(cfg.Redact, RedactSource{Name: "thread-env-" + name, Env: name})
@@ -125,16 +126,17 @@ func applyThread(cfg *SessionConfig, agent *v1alpha1.OmpAgent, thread *v1alpha1.
 	}
 
 	cfg.Thread = &ThreadConfig{
-		Name:               thread.Name,
-		Branch:             cloudspec.Branch(thread.Name),
-		BaseCommit:         thread.Spec.Repo.BaseCommit,
-		RepoName:           thread.Spec.Repo.Name,
-		LocalBranch:        thread.Spec.Repo.LocalBranch,
-		Thinking:           thread.Spec.Thinking,
-		TurnTimeoutSeconds: cfg.TimeoutSeconds,
-		IdleTimeoutSeconds: int64(cloudspec.IdleTimeout(&cloud) / time.Second),
-		MaxSittingSeconds:  int64(cloudspec.MaxSitting(&cloud) / time.Second),
-		Push:               push,
+		Name:                   thread.Name,
+		Branch:                 cloudspec.Branch(thread.Name),
+		BaseCommit:             thread.Spec.Repo.BaseCommit,
+		RepoName:               thread.Spec.Repo.Name,
+		LocalBranch:            thread.Spec.Repo.LocalBranch,
+		Thinking:               thread.Spec.Thinking,
+		TurnTimeoutSeconds:     cfg.TimeoutSeconds,
+		IdleTimeoutSeconds:     int64(cloudspec.IdleTimeout(&cloud) / time.Second),
+		MaxSittingSeconds:      int64(cloudspec.MaxSitting(&cloud) / time.Second),
+		QuestionTimeoutSeconds: int64(cloudspec.QuestionTimeout(&cloud) / time.Second),
+		Push:                   push,
 	}
 }
 

@@ -258,13 +258,15 @@ const (
 )
 
 // ThreadPhase is the lifecycle phase of an OmpThread.
-// +kubebuilder:validation:Enum=Working;Idle
+// +kubebuilder:validation:Enum=Working;Waiting;Idle
 type ThreadPhase string
 
 // Thread phases.
 const (
 	// ThreadPhaseWorking means a turn is queued or running.
 	ThreadPhaseWorking ThreadPhase = "Working"
+	// ThreadPhaseWaiting means the running turn asked a question nobody answered yet.
+	ThreadPhaseWaiting ThreadPhase = "Waiting"
 	// ThreadPhaseIdle means every turn has finished.
 	ThreadPhaseIdle ThreadPhase = "Idle"
 )

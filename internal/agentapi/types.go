@@ -256,6 +256,9 @@ type ThreadConfig struct {
 	MaxSittingSeconds int64 `json:"maxSittingSeconds"`
 	// Push is true when the matched git host has push set.
 	Push bool `json:"push,omitempty"`
+	// QuestionTimeoutSeconds is how long the driver waits for an answer to an ask
+	// before expiring it (cloud.questionTimeout).
+	QuestionTimeoutSeconds int64 `json:"questionTimeoutSeconds,omitempty"`
 }
 
 // ModelConfig mirrors spec.model.
@@ -317,6 +320,61 @@ type TurnComplete struct {
 	// not (at most 300 characters).
 	Pushed    bool   `json:"pushed,omitempty"`
 	PushError string `json:"pushError,omitempty"`
+}
+
+// QuestionOption is one choice of a question; it has the JSON of threads.QuestionOption.
+type QuestionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// Question is one asked question and its answer; it has the JSON of threads.Question.
+type Question struct {
+	ID          int              `json:"id"`
+	Ask         int              `json:"ask"`
+	Key         string           `json:"key"`
+	Text        string           `json:"text"`
+	Header      string           `json:"header,omitempty"`
+	Options     []QuestionOption `json:"options,omitempty"`
+	Multi       bool             `json:"multi,omitempty"`
+	Recommended *int             `json:"recommended,omitempty"`
+	AskedAt     time.Time        `json:"askedAt"`
+	Selected    []string         `json:"selected,omitempty"`
+	Answer      string           `json:"answer,omitempty"`
+	AnsweredBy  string           `json:"answeredBy,omitempty"`
+	AnsweredAt  *time.Time       `json:"answeredAt,omitempty"`
+	Expired     bool             `json:"expired,omitempty"`
+}
+
+// AskQuestion is one question of an AskRequest (omp's ask tool: one entry per question).
+type AskQuestion struct {
+	// Key is omp's question id inside its ask call.
+	Key         string           `json:"key"`
+	Text        string           `json:"text"`
+	Header      string           `json:"header,omitempty"`
+	Options     []QuestionOption `json:"options,omitempty"`
+	Multi       bool             `json:"multi,omitempty"`
+	Recommended *int             `json:"recommended,omitempty"`
+}
+
+// AskRequest is POSTed to /v1/sessions/{ns}/{name}/thread/turns/{id}/asks: one ask call.
+type AskRequest struct {
+	Questions []AskQuestion `json:"questions"`
+}
+
+// AskState is the state of one ask call: the 201 of POST asks, the 200 of
+// GET asks/{ask} (only when Done) and the 200 of POST asks/{ask}/expire.
+type AskState struct {
+	Ask int `json:"ask"`
+	// Done is true when every question has an answer.
+	Done      bool       `json:"done"`
+	Questions []Question `json:"questions"`
+}
+
+// AskExpire is POSTed to .../asks/{ask}/expire: Answer becomes the answer of every
+// question of the ask that is still open.
+type AskExpire struct {
+	Answer string `json:"answer"`
 }
 
 // ActionResult is the response of POST /v1/sessions/{ns}/{name}/actions/{tool}.

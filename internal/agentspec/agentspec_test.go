@@ -181,6 +181,15 @@ func TestValidate(t *testing.T) {
 		{"cloud threadRetention too short", func(s *ompv1alpha1.OmpAgentSpec) {
 			s.Cloud = &ompv1alpha1.CloudSpec{ThreadRetention: dur(59 * time.Minute)}
 		}, ReasonInvalidSpec, "cloud.threadRetention"},
+		{"cloud questionTimeout bounds ok", func(s *ompv1alpha1.OmpAgentSpec) {
+			s.Cloud = &ompv1alpha1.CloudSpec{QuestionTimeout: dur(24 * time.Hour)}
+		}, "", ""},
+		{"cloud questionTimeout too short", func(s *ompv1alpha1.OmpAgentSpec) {
+			s.Cloud = &ompv1alpha1.CloudSpec{QuestionTimeout: dur(59 * time.Second)}
+		}, ReasonInvalidSpec, "cloud.questionTimeout"},
+		{"cloud questionTimeout too long", func(s *ompv1alpha1.OmpAgentSpec) {
+			s.Cloud = &ompv1alpha1.CloudSpec{QuestionTimeout: dur(25 * time.Hour)}
+		}, ReasonInvalidSpec, "cloud.questionTimeout"},
 		{"cloud git ok", func(s *ompv1alpha1.OmpAgentSpec) {
 			s.Cloud = &ompv1alpha1.CloudSpec{Git: []ompv1alpha1.CloudGitHost{cloudHost("github.com"), cloudHost("git.example.com")}}
 		}, "", ""},

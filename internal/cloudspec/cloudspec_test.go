@@ -176,15 +176,18 @@ func TestMatchGitHost(t *testing.T) {
 
 func TestCloudDefaults(t *testing.T) {
 	var c v1alpha1.CloudSpec
-	if IdleTimeout(&c) != 10*time.Minute || MaxSitting(&c) != 4*time.Hour || ThreadRetention(&c) != 168*time.Hour {
-		t.Errorf("defaults = %s %s %s", IdleTimeout(&c), MaxSitting(&c), ThreadRetention(&c))
+	if IdleTimeout(&c) != 10*time.Minute || MaxSitting(&c) != 4*time.Hour || ThreadRetention(&c) != 168*time.Hour ||
+		QuestionTimeout(&c) != 30*time.Minute {
+		t.Errorf("defaults = %s %s %s %s", IdleTimeout(&c), MaxSitting(&c), ThreadRetention(&c), QuestionTimeout(&c))
 	}
 	c = v1alpha1.CloudSpec{
 		IdleTimeout:     metav1.Duration{Duration: time.Minute},
 		MaxSitting:      metav1.Duration{Duration: time.Hour},
 		ThreadRetention: metav1.Duration{Duration: 2 * time.Hour},
+		QuestionTimeout: metav1.Duration{Duration: 5 * time.Minute},
 	}
-	if IdleTimeout(&c) != time.Minute || MaxSitting(&c) != time.Hour || ThreadRetention(&c) != 2*time.Hour {
-		t.Errorf("set values = %s %s %s", IdleTimeout(&c), MaxSitting(&c), ThreadRetention(&c))
+	if IdleTimeout(&c) != time.Minute || MaxSitting(&c) != time.Hour || ThreadRetention(&c) != 2*time.Hour ||
+		QuestionTimeout(&c) != 5*time.Minute {
+		t.Errorf("set values = %s %s %s %s", IdleTimeout(&c), MaxSitting(&c), ThreadRetention(&c), QuestionTimeout(&c))
 	}
 }

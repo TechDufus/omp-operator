@@ -160,6 +160,12 @@ type CloudSpec struct {
 	// +optional
 	ThreadRetention metav1.Duration `json:"threadRetention,omitzero"`
 
+	// questionTimeout is how long a cloud agent waits for the answer to a question it asked (omp's ask tool)
+	// before it is told to continue with its best judgment.
+	// +kubebuilder:default="30m"
+	// +optional
+	QuestionTimeout metav1.Duration `json:"questionTimeout,omitzero"`
+
 	// git lists the git hosts threads may fetch from and push to.
 	// +optional
 	// +kubebuilder:validation:MaxItems=16

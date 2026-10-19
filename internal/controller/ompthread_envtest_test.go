@@ -262,6 +262,68 @@ var _ = Describe("OmpThread", func() {
 		Consistently(func() int { return len(etSittingsOf(ns, th.Name)) }).Should(Equal(1))
 	})
 
+	It("is Waiting with status.question while the running turn has an unanswered question", func() {
+		agent := etCloudAgent(false, nil)
+		th := etCreateThread(agent, nil)
+		etEnqueue(th, "migrate the database")
+		sittingKey := etSitting(th, 1)
+		turn := etTakeTurn(sittingKey, th.Name)
+		Eventually(func() ompv1alpha1.ThreadPhase { return etThreadOf(th).Status.Phase }).Should(Equal(ompv1alpha1.ThreadPhaseWorking))
+		Expect(etThreadOf(th).Status.Question).To(BeNil())
+
+		// The driver's ask path: record the ask, then signal.
+		_, _, err := etThreads.Ask(th.Namespace, th.Name, sittingKey.Name, turn.ID, []threads.QuestionInput{
+			{Key: "db", Text: "Which database?", Options: []threads.QuestionOption{{Label: "sqlite"}, {Label: "postgres"}}},
+			{Key: "why", Text: "Why that one?"},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		etThreads.Signal(th.Namespace, th.Name)
+		Eventually(func(g Gomega) {
+			cur := etThreadOf(th)
+			g.Expect(cur.Status.Phase).To(Equal(ompv1alpha1.ThreadPhaseWaiting))
+			g.Expect(cur.Status.Question).NotTo(BeNil())
+			g.Expect(cur.Status.Question.Turn).To(BeEquivalentTo(turn.ID))
+			g.Expect(cur.Status.Question.ID).To(BeEquivalentTo(1))
+			g.Expect(cur.Status.Question.Text).To(Equal("Which database?"))
+			g.Expect(cur.Status.Question.AskedAt.IsZero()).To(BeFalse())
+		}).Should(Succeed())
+
+		// Answering the first moves status.question to the next one of the ask.
+		_, err = etThreads.Answer(th.Namespace, th.Name, turn.ID, 1, []string{"sqlite"}, "", "token:dev")
+		Expect(err).NotTo(HaveOccurred())
+		etThreads.Signal(th.Namespace, th.Name)
+		Eventually(func(g Gomega) {
+			cur := etThreadOf(th)
+			g.Expect(cur.Status.Phase).To(Equal(ompv1alpha1.ThreadPhaseWaiting))
+			g.Expect(cur.Status.Question).NotTo(BeNil())
+			g.Expect(cur.Status.Question.ID).To(BeEquivalentTo(2))
+		}).Should(Succeed())
+
+		// The last answer ends the wait: Working again, no question.
+		_, err = etThreads.Answer(th.Namespace, th.Name, turn.ID, 2, nil, "it is embedded", "token:dev")
+		Expect(err).NotTo(HaveOccurred())
+		etThreads.Signal(th.Namespace, th.Name)
+		Eventually(func(g Gomega) {
+			cur := etThreadOf(th)
+			g.Expect(cur.Status.Phase).To(Equal(ompv1alpha1.ThreadPhaseWorking))
+			g.Expect(cur.Status.Question).To(BeNil())
+		}).Should(Succeed())
+
+		// A stop expires an open question, so the thread is not Waiting any more.
+		_, _, err = etThreads.Ask(th.Namespace, th.Name, sittingKey.Name, turn.ID, []threads.QuestionInput{{Key: "more", Text: "And now?"}})
+		Expect(err).NotTo(HaveOccurred())
+		etThreads.Signal(th.Namespace, th.Name)
+		Eventually(func() ompv1alpha1.ThreadPhase { return etThreadOf(th).Status.Phase }).Should(Equal(ompv1alpha1.ThreadPhaseWaiting))
+		_, _, err = etThreads.Stop(th.Namespace, th.Name, "token:dev")
+		Expect(err).NotTo(HaveOccurred())
+		etThreads.Signal(th.Namespace, th.Name)
+		Eventually(func(g Gomega) {
+			cur := etThreadOf(th)
+			g.Expect(cur.Status.Phase).To(Equal(ompv1alpha1.ThreadPhaseWorking))
+			g.Expect(cur.Status.Question).To(BeNil())
+		}).Should(Succeed())
+	})
+
 	It("notifies each finished turn once", func() {
 		agent := etCloudAgent(false, nil)
 		th := etCreateThread(agent, nil)

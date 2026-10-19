@@ -222,6 +222,136 @@ func (s *Server) handleThreadTurnComplete(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// askIDs parses the {id} and {ask} path values; ask is optional (zero).
+func askIDs(w http.ResponseWriter, r *http.Request, withAsk bool) (turn, ask int, ok bool) {
+	turn, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil || turn < 1 {
+		writeError(w, http.StatusBadRequest, "invalid turn id")
+		return 0, 0, false
+	}
+	if !withAsk {
+		return turn, 0, true
+	}
+	ask, err = strconv.Atoi(r.PathValue("ask"))
+	if err != nil || ask < 1 {
+		writeError(w, http.StatusBadRequest, "invalid ask number")
+		return 0, 0, false
+	}
+	return turn, ask, true
+}
+
+// askState converts the questions of one ask to its wire state.
+func askState(ask int, qs []threads.Question, done bool) AskState {
+	st := AskState{Ask: ask, Done: done, Questions: make([]Question, len(qs))}
+	for i, q := range qs {
+		st.Questions[i] = Question{
+			ID: q.ID, Ask: q.Ask, Key: q.Key, Text: q.Text, Header: q.Header, Multi: q.Multi,
+			Recommended: q.Recommended, AskedAt: q.AskedAt, Selected: q.Selected, Answer: q.Answer,
+			AnsweredBy: q.AnsweredBy, AnsweredAt: q.AnsweredAt, Expired: q.Expired,
+		}
+		for _, o := range q.Options {
+			st.Questions[i].Options = append(st.Questions[i].Options, QuestionOption{Label: o.Label, Description: o.Description})
+		}
+	}
+	return st
+}
+
+// allAnswered reports whether every question has an answer.
+func allAnswered(qs []threads.Question) bool {
+	return !slices.ContainsFunc(qs, func(q threads.Question) bool { return !q.Answered() })
+}
+
+// askError answers the errors the ask calls share: 409 for a turn that is not running for this
+// sitting, 404 for an unknown ask, 400 for invalid input.
+func (s *Server) askError(w http.ResponseWriter, what string, err error) {
+	switch {
+	case errors.Is(err, threads.ErrNotRunning):
+		writeError(w, http.StatusConflict, "turn is not running for this session")
+	case errors.Is(err, threads.ErrQuestionNotFound):
+		writeError(w, http.StatusNotFound, "ask not found")
+	case errors.Is(err, threads.ErrInvalidQuestion), errors.Is(err, threads.ErrInvalidAnswer):
+		writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		s.internalError(w, what, err)
+	}
+}
+
+// handleThreadAsk records one ask call of the running turn: 201 with its state, 409 when the turn
+// is not running for this sitting, 400 for invalid questions.
+func (s *Server) handleThreadAsk(w http.ResponseWriter, r *http.Request, req *threadReq) {
+	id, _, ok := askIDs(w, r, false)
+	if !ok {
+		return
+	}
+	var body AskRequest
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	in := make([]threads.QuestionInput, len(body.Questions))
+	for i, q := range body.Questions {
+		in[i] = threads.QuestionInput{Key: q.Key, Text: q.Text, Header: q.Header, Multi: q.Multi, Recommended: q.Recommended}
+		for _, o := range q.Options {
+			in[i].Options = append(in[i].Options, threads.QuestionOption{Label: o.Label, Description: o.Description})
+		}
+	}
+	ask, qs, err := s.Threads.Ask(req.ns, req.thread.Name, req.name, id, in)
+	if err != nil {
+		s.askError(w, "ask", err)
+		return
+	}
+	s.Threads.Signal(req.ns, req.thread.Name) // the thread is Waiting now
+	writeJSON(w, http.StatusCreated, askState(ask, qs, false))
+}
+
+// handleThreadAskState long-polls for the answers of an ask: 200 when every question has one, 204 while waiting.
+func (s *Server) handleThreadAskState(w http.ResponseWriter, r *http.Request, req *threadReq) {
+	id, ask, ok := askIDs(w, r, true)
+	if !ok {
+		return
+	}
+	wait := time.Duration(0)
+	if v := r.URL.Query().Get("wait"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid wait")
+			return
+		}
+		wait = time.Duration(min(max(n, 1), maxNextWaitSeconds)) * time.Second
+	}
+	qs, done, err := s.Threads.WaitAsk(r.Context(), req.ns, req.thread.Name, req.name, id, ask, wait)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return // the driver went away
+		}
+		s.askError(w, "wait for ask", err)
+		return
+	}
+	if !done {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeJSON(w, http.StatusOK, askState(ask, qs, true))
+}
+
+// handleThreadAskExpire answers the open questions of an ask with the driver's text (its question timeout ran out).
+func (s *Server) handleThreadAskExpire(w http.ResponseWriter, r *http.Request, req *threadReq) {
+	id, ask, ok := askIDs(w, r, true)
+	if !ok {
+		return
+	}
+	var body AskExpire
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	qs, err := s.Threads.ExpireAsk(req.ns, req.thread.Name, req.name, id, ask, body.Answer, threads.AnsweredByTimeout)
+	if err != nil {
+		s.askError(w, "expire ask", err)
+		return
+	}
+	s.Threads.Signal(req.ns, req.thread.Name) // the thread is no longer Waiting
+	writeJSON(w, http.StatusOK, askState(ask, qs, allAnswered(qs)))
+}
+
 // handleGetCloudToolchain serves a cached repository toolchain of the agent.
 func (s *Server) handleGetCloudToolchain(w http.ResponseWriter, r *http.Request, req *threadReq) {
 	hash := r.PathValue("hash")

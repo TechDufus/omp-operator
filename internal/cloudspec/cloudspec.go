@@ -41,6 +41,7 @@ const (
 	DefaultIdleTimeout     = 10 * time.Minute
 	DefaultMaxSitting      = 4 * time.Hour
 	DefaultThreadRetention = 168 * time.Hour
+	DefaultQuestionTimeout = 30 * time.Minute
 )
 
 // IdleTimeout is c.IdleTimeout, or DefaultIdleTimeout when unset.
@@ -56,6 +57,11 @@ func MaxSitting(c *v1alpha1.CloudSpec) time.Duration {
 // ThreadRetention is c.ThreadRetention, or DefaultThreadRetention when unset.
 func ThreadRetention(c *v1alpha1.CloudSpec) time.Duration {
 	return orDefault(c.ThreadRetention.Duration, DefaultThreadRetention)
+}
+
+// QuestionTimeout is c.QuestionTimeout, or DefaultQuestionTimeout when unset.
+func QuestionTimeout(c *v1alpha1.CloudSpec) time.Duration {
+	return orDefault(c.QuestionTimeout.Duration, DefaultQuestionTimeout)
 }
 
 func orDefault(d, def time.Duration) time.Duration {

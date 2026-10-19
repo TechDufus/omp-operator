@@ -59,6 +59,8 @@ const (
 	maxSummaryTitle = 80
 	maxSummaryReply = 3000
 	maxSummaryError = 1000
+	// maxSummaryQuestion is the length of the question text kept in the thread status.
+	maxSummaryQuestion = 1000
 )
 
 // ThreadNotifier tells an agent's sinks that a thread turn finished. *notify.Dispatcher
@@ -191,7 +193,7 @@ func (r *OmpThreadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// 8. requeue
-	if st.phase == ompv1alpha1.ThreadPhaseWorking {
+	if st.phase != ompv1alpha1.ThreadPhaseIdle {
 		return ctrl.Result{RequeueAfter: durOr(r.WorkingRequeue, defaultThreadWorkingRequeue)}, nil
 	}
 	left := st.lastActivity.Add(retention).Sub(now)
@@ -394,6 +396,7 @@ type computedStatus struct {
 	latest       *ompv1alpha1.ThreadTurnSummary
 	result       *ompv1alpha1.ThreadResult
 	lastActivity time.Time
+	question     *ompv1alpha1.ThreadQuestion
 }
 
 func threadStatus(th *ompv1alpha1.OmpThread, turns []threads.Turn, active string) computedStatus {
@@ -451,6 +454,13 @@ func threadStatus(th *ompv1alpha1.OmpThread, turns []threads.Turn, active string
 			st.result = res
 		}
 	}
+	if p := threads.PendingQuestion(turns); p != nil {
+		st.phase = ompv1alpha1.ThreadPhaseWaiting
+		st.question = &ompv1alpha1.ThreadQuestion{
+			Turn: int32(p.Turn), ID: int32(p.Question.ID), Text: truncate(p.Question.Text, maxSummaryQuestion),
+			AskedAt: secondTime(p.Question.AskedAt),
+		}
+	}
 	return st
 }
 
@@ -460,7 +470,7 @@ func applyThreadStatus(cur *ompv1alpha1.OmpThread, st computedStatus) bool {
 	s := &cur.Status
 	s.ObservedGeneration = cur.Generation
 	s.Phase, s.Turns, s.Queued, s.ActiveSession = st.phase, st.turns, st.queued, st.active
-	s.Latest, s.Result = st.latest, st.result
+	s.Latest, s.Result, s.Question = st.latest, st.result, st.question
 	la := secondTime(st.lastActivity)
 	s.LastActivityAt = &la
 	meta.SetStatusCondition(&s.Conditions, metav1.Condition{
@@ -485,12 +495,17 @@ func equalThreadStatus(a, b *ompv1alpha1.OmpThreadStatus) bool {
 				x.PushError == y.PushError && x.UpdatedAt.Equal(&y.UpdatedAt)
 		}) &&
 		equalTimePtr(a.LastActivityAt, b.LastActivityAt) &&
+		equalPtr(a.Question, b.Question, equalThreadQuestion) &&
 		len(a.Conditions) == len(b.Conditions) &&
 		!slices.ContainsFunc(b.Conditions, func(c metav1.Condition) bool {
 			o := meta.FindStatusCondition(a.Conditions, c.Type)
 			return o == nil || o.Status != c.Status || o.Reason != c.Reason || o.Message != c.Message ||
 				o.ObservedGeneration != c.ObservedGeneration
 		})
+}
+
+func equalThreadQuestion(x, y *ompv1alpha1.ThreadQuestion) bool {
+	return x.Turn == y.Turn && x.ID == y.ID && x.Text == y.Text && x.AskedAt.Equal(&y.AskedAt)
 }
 
 func equalPtr[T any](a, b *T, eq func(x, y *T) bool) bool {
@@ -529,24 +544,28 @@ func (r *OmpThreadReconciler) patchStatus(ctx context.Context, th *ompv1alpha1.O
 	})
 }
 
-// updateThreadsGauge republishes the Working and Idle thread counts of the agent.
+// updateThreadsGauge republishes the Working, Waiting and Idle thread counts of the agent.
 func (r *OmpThreadReconciler) updateThreadsGauge(ctx context.Context, ns, agent string) {
 	var list ompv1alpha1.OmpThreadList
 	if err := r.List(ctx, &list, client.InNamespace(ns)); err != nil {
 		return
 	}
-	var working, idle float64
+	var working, waiting, idle float64
 	for _, t := range list.Items {
 		if t.Spec.AgentRef.Name != agent || !t.DeletionTimestamp.IsZero() {
 			continue
 		}
-		if t.Status.Phase == ompv1alpha1.ThreadPhaseWorking {
+		switch t.Status.Phase {
+		case ompv1alpha1.ThreadPhaseWorking:
 			working++
-		} else {
+		case ompv1alpha1.ThreadPhaseWaiting:
+			waiting++
+		default:
 			idle++
 		}
 	}
 	metrics.ThreadsActive.WithLabelValues(ns, agent, string(ompv1alpha1.ThreadPhaseWorking)).Set(working)
+	metrics.ThreadsActive.WithLabelValues(ns, agent, string(ompv1alpha1.ThreadPhaseWaiting)).Set(waiting)
 	metrics.ThreadsActive.WithLabelValues(ns, agent, string(ompv1alpha1.ThreadPhaseIdle)).Set(idle)
 }
 

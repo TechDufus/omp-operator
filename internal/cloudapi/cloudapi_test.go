@@ -385,6 +385,7 @@ func TestAuth(t *testing.T) {
 			{http.MethodPost, threadsPath},
 			{http.MethodPost, threadsPath + "/coder-abc123/messages"},
 			{http.MethodPost, threadsPath + "/coder-abc123/stop"},
+			{http.MethodPost, threadsPath + "/coder-abc123/turns/1/questions/1/answer"},
 			{http.MethodDelete, threadsPath + "/coder-abc123"},
 		} {
 			w := h.do(rt.method, rt.path, viewerToken, nil)

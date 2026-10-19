@@ -142,6 +142,7 @@ they run the agent's image, model, credentials, MCP servers, skills and `limits`
 | `idleTimeout` | duration | `10m` | How long a sitting waits for the next message before it saves its state and exits. 1m to 24h |
 | `maxSitting` | duration | `4h` | A sitting takes no turn that could end past this; the next message starts a new pod. The pod deadline is this plus 10 minutes. 10m to 24h |
 | `threadRetention` | duration | `168h` | An Idle thread is deleted this long after its last activity. At least 1h |
+| `questionTimeout` | duration | `30m` | How long a sitting waits for the answer to a question the agent asked with omp's `ask` tool. Then the agent is told to continue with its best judgment. Time spent waiting does not count toward `limits.sessionTimeout`. 1m to 24h |
 | `git` | [][CloudGitHost](#cloudgit) | | At most 16 |
 
 #### cloud.git
