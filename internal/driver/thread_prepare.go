@@ -351,6 +351,9 @@ func (d *Driver) restoreThreadToolchain(ctx context.Context, tc *agentapi.Toolch
 		return "", nil
 	}
 	found, err := d.restoreTarball(ctx, "/toolchains/"+hash, d.Paths.MiseDir)
+	if err == nil && found {
+		err = d.reshimMise(ctx)
+	}
 	if err != nil {
 		d.postEvent(ctx, eventToolchain, "toolchain restore failed: "+truncate(err.Error(), maxEventError))
 	}
@@ -374,7 +377,7 @@ func (d *Driver) cacheToolchain(ctx context.Context, hash string) error {
 		return err
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
-	if err := WriteTarGz(tmp, d.Paths.MiseDataDir, filepath.Base(d.Paths.MiseDataDir)); err != nil {
+	if err := PackMiseData(tmp, d.Paths.MiseDataDir); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("pack %s: %w", d.Paths.MiseDataDir, err)
 	}

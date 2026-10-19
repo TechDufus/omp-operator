@@ -207,6 +207,19 @@ func extractHardlink(root *os.Root, name string, h *tar.Header) error {
 // prefix is prepended (and gets a directory entry of its own). Regular files, directories
 // and symlinks are archived; everything else is skipped. Files that vanish mid-walk are ignored.
 func WriteTarGz(w io.Writer, src, prefix string) error {
+	return writeTarGz(w, src, prefix, nil)
+}
+
+// PackMiseData writes the mise data directory dataDir as a toolchain tarball under the
+// prefix "data". The shims directory is left out: mise's shims are symlinks to the mise
+// binary outside the tarball, which extraction refuses; reshimMise recreates them.
+func PackMiseData(w io.Writer, dataDir string) error {
+	return writeTarGz(w, dataDir, filepath.Base(dataDir), func(rel string) bool { return rel == "shims" })
+}
+
+// writeTarGz is WriteTarGz leaving out every src-relative path skip reports (a skipped
+// directory is left out with its contents).
+func writeTarGz(w io.Writer, src, prefix string, skip func(rel string) bool) error {
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
 	walkErr := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
@@ -219,6 +232,12 @@ func WriteTarGz(w io.Writer, src, prefix string) error {
 		rel, err := filepath.Rel(src, p)
 		if err != nil {
 			return err
+		}
+		if skip != nil && rel != "." && skip(filepath.ToSlash(rel)) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		name := path.Join(prefix, filepath.ToSlash(rel))
 		if rel == "." {

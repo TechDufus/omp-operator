@@ -78,6 +78,8 @@ func (d *Driver) Prepare(ctx context.Context) error {
 			}
 			if !found {
 				d.Log.Warn("operator has no stored toolchain tarball; continuing without", "hash", plan.Toolchain.Hash)
+			} else if err := d.reshimMise(ctx); err != nil {
+				d.Log.Warn("toolchain restored without shims; its tools are not on PATH", "error", err)
 			}
 		}
 		if plan.Continuity != nil {

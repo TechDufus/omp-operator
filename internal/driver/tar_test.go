@@ -153,3 +153,30 @@ func TestWriteTarGzRoundTrip(t *testing.T) {
 		t.Fatal("unprefixed tarball must be src-relative")
 	}
 }
+
+// mise's shims are symlinks to the mise binary outside the data directory; a toolchain
+// tarball carrying them could never be extracted.
+func TestPackMiseDataLeavesOutShims(t *testing.T) {
+	data := filepath.Join(t.TempDir(), "data")
+	writeFile(t, filepath.Join(data, "installs", "go", "1.27.2", "bin", "go"), "go-binary")
+	if err := os.MkdirAll(filepath.Join(data, "shims"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/local/bin/mise", filepath.Join(data, "shims", "go")); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := PackMiseData(&buf, data); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "mise")
+	if err := ExtractTarGz(&buf, dest, 1<<20); err != nil {
+		t.Fatalf("a packed toolchain must extract: %v", err)
+	}
+	if got := readFile(t, filepath.Join(dest, "data", "installs", "go", "1.27.2", "bin", "go")); got != "go-binary" {
+		t.Fatalf("installs: %q", got)
+	}
+	if _, err := os.Lstat(filepath.Join(dest, "data", "shims")); err == nil {
+		t.Fatal("shims must not be packed")
+	}
+}

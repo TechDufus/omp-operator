@@ -111,7 +111,7 @@ func (d *Driver) Toolsync(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
-	if err := WriteTarGz(tmp, d.Paths.MiseDataDir, filepath.Base(d.Paths.MiseDataDir)); err != nil {
+	if err := PackMiseData(tmp, d.Paths.MiseDataDir); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("pack %s: %w", d.Paths.MiseDataDir, err)
 	}
@@ -154,6 +154,22 @@ func (d *Driver) miseInstall(ctx context.Context, timeout time.Duration, env ...
 	cmd.Stdout, cmd.Stderr = d.Stderr, d.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("mise install: %w", err)
+	}
+	return nil
+}
+
+// reshimMise recreates the shims of the tools in the mise data directory after a toolchain
+// tarball (which carries no shims) was restored. Without shims nothing is on PATH, so a
+// failure is returned.
+func (d *Driver) reshimMise(ctx context.Context) error {
+	rctx, cancel := child(ctx, controlTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(rctx, d.MiseBin, "reshim")
+	cmd.Dir = d.Paths.Workspace
+	cmd.Env = append(os.Environ(), "HOME="+d.Paths.Home, "MISE_DATA_DIR="+d.Paths.MiseDataDir, "MISE_YES=1")
+	cmd.Stdout, cmd.Stderr = d.Stderr, d.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("mise reshim: %w", err)
 	}
 	return nil
 }
