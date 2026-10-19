@@ -270,3 +270,23 @@ func longestBacktickRun(s string) int {
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
+
+// MaxTitleRunes is the longest title TitleFromReply returns.
+const MaxTitleRunes = 80
+
+// TitleFromReply returns the first non-empty line of reply, with leading
+// markdown markers ('#', '*', '-', '>') and spaces stripped, cut to 80 runes.
+// A line that is only markers is skipped.
+func TitleFromReply(reply string) string {
+	for line := range strings.SplitSeq(reply, "\n") {
+		line = strings.TrimSpace(strings.TrimLeft(line, "#*-> \t\r"))
+		if line == "" {
+			continue
+		}
+		if r := []rune(line); len(r) > MaxTitleRunes {
+			line = strings.TrimSpace(string(r[:MaxTitleRunes]))
+		}
+		return line
+	}
+	return ""
+}

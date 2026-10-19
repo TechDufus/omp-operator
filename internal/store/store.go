@@ -15,13 +15,15 @@ limitations under the License.
 */
 
 // Package store keeps the operator's on-disk data under --data-dir: session
-// files, continuity tarballs and toolchain tarballs.
+// files, continuity tarballs, toolchain tarballs and cloud thread files.
 //
 // Layout:
 //
 //	sessions/<uid>/{events.jsonl,transcript.html,report.md}
 //	continuity/<ns>/<agent>/<sha16>.tar.gz
 //	toolchains/<ns>/<agent>/<hash>.tar.gz
+//	cloud-toolchains/<ns>/<agent>/<hash>.tar.gz
+//	threads/<ns>/<name>/{source.bundle,result.bundle,setup.tar.gz,turns.json}
 //
 // Every path component supplied by callers is validated, and every file is
 // written to a temporary file and renamed into place, so readers never see a
@@ -55,6 +57,15 @@ const (
 	MaxContinuityBytes int64 = 64 << 20
 	// MaxToolchainBytes is the largest accepted toolchain tarball.
 	MaxToolchainBytes int64 = 2 << 30
+	// MaxResultBytes is the largest accepted thread result bundle.
+	MaxResultBytes int64 = 1 << 30
+	// MaxSetupBytes is the largest accepted thread setup tarball.
+	MaxSetupBytes int64 = 64 << 20
+
+	// keepToolchains is how many agent toolchain tarballs are kept: the newest and the previous one.
+	keepToolchains = 2
+	// keepCloudToolchains is how many cloud toolchain tarballs are kept per agent.
+	keepCloudToolchains = 8
 
 	tarballExt = ".tar.gz"
 	tempPrefix = ".tmp-"
@@ -398,11 +409,12 @@ func (s *Store) PutToolchain(ns, agent, hash string, r io.Reader) error {
 	if err := writeAtomic(s.toolchainPath(ns, agent, hash), r, MaxToolchainBytes); err != nil {
 		return err
 	}
-	return s.pruneToolchains(ns, agent, hash)
+	return pruneTarballs(s.toolchainDir(ns, agent), hash, keepToolchains)
 }
 
-func (s *Store) pruneToolchains(ns, agent, keep string) error {
-	dir := s.toolchainDir(ns, agent)
+// pruneTarballs keeps the tarball named keep and the newest keepTotal-1 others
+// in dir, ordered by modification time (ties by name), and removes the rest.
+func pruneTarballs(dir, keep string, keepTotal int) error {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return err
@@ -423,7 +435,6 @@ func (s *Store) pruneToolchains(ns, agent, keep string) error {
 		}
 		others = append(others, old{name, info.ModTime()})
 	}
-	// Newest first; the first entry is the previous toolchain and is kept.
 	slices.SortFunc(others, func(a, b old) int {
 		if c := b.mod.Compare(a.mod); c != 0 {
 			return c
@@ -431,7 +442,7 @@ func (s *Store) pruneToolchains(ns, agent, keep string) error {
 		return strings.Compare(b.name, a.name)
 	})
 	for i, o := range others {
-		if i == 0 {
+		if i < keepTotal-1 {
 			continue
 		}
 		if err := os.Remove(filepath.Join(dir, o.name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -449,7 +460,7 @@ func (s *Store) OpenToolchain(ns, agent, hash string) (*os.File, error) {
 	return open(s.toolchainPath(ns, agent, hash))
 }
 
-// RemoveAgent deletes all continuity and toolchain data of the agent. Missing data is not an error.
+// RemoveAgent deletes all continuity, toolchain and cloud toolchain data of the agent. Missing data is not an error.
 func (s *Store) RemoveAgent(ns, agent string) error {
 	if err := validName(ns, agent); err != nil {
 		return err
@@ -458,12 +469,143 @@ func (s *Store) RemoveAgent(ns, agent string) error {
 	e := s.lock(key)
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	ckey := cloudToolchainKey(ns, agent)
+	ce := s.lock(ckey)
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
 	if err := os.RemoveAll(s.continuityDir(ns, agent)); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(s.toolchainDir(ns, agent)); err != nil {
 		return err
 	}
+	if err := os.RemoveAll(s.cloudToolchainDir(ns, agent)); err != nil {
+		return err
+	}
 	s.locks.Delete(key)
+	s.locks.Delete(ckey)
+	return nil
+}
+
+// ---- cloud toolchains ----
+
+func cloudToolchainKey(ns, agent string) string { return "cloud-toolchain/" + ns + "/" + agent }
+
+func (s *Store) cloudToolchainDir(ns, agent string) string {
+	return filepath.Join(s.root, "cloud-toolchains", ns, agent)
+}
+
+func (s *Store) cloudToolchainPath(ns, agent, hash string) string {
+	return filepath.Join(s.cloudToolchainDir(ns, agent), hash+tarballExt)
+}
+
+// PutCloudToolchain streams a cloud toolchain tarball, which a thread sitting
+// uploads after running mise install, and keeps the agent's 8 most recently
+// used tarballs (by modification time). Input over MaxToolchainBytes fails with
+// ErrTooLarge and prunes nothing.
+func (s *Store) PutCloudToolchain(ns, agent, hash string, r io.Reader) error {
+	if err := validName(ns, agent, hash); err != nil {
+		return err
+	}
+	e := s.lock(cloudToolchainKey(ns, agent))
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if err := writeAtomic(s.cloudToolchainPath(ns, agent, hash), r, MaxToolchainBytes); err != nil {
+		return err
+	}
+	return pruneTarballs(s.cloudToolchainDir(ns, agent), hash, keepCloudToolchains)
+}
+
+// OpenCloudToolchain opens the cloud toolchain tarball for hash and refreshes
+// its modification time so it counts as recently used, or returns ErrNotFound.
+func (s *Store) OpenCloudToolchain(ns, agent, hash string) (*os.File, error) {
+	if err := validName(ns, agent, hash); err != nil {
+		return nil, err
+	}
+	e := s.lock(cloudToolchainKey(ns, agent))
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	path := s.cloudToolchainPath(ns, agent, hash)
+	f, err := open(path)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// ---- threads ----
+
+func (s *Store) threadDir(ns, name string) string {
+	return filepath.Join(s.root, "threads", ns, name)
+}
+
+func threadFileKey(ns, name, file string) string { return "thread/" + ns + "/" + name + "/" + file }
+
+// PutThreadFile streams r into the thread's file (for example source.bundle),
+// atomically replacing any previous content. A positive max rejects larger
+// input with ErrTooLarge and leaves the previous content intact.
+func (s *Store) PutThreadFile(ns, name, file string, r io.Reader, maxBytes int64) error {
+	if err := validName(ns, name, file); err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(s.threadDir(ns, name), file), r, maxBytes)
+}
+
+// OpenThreadFile opens the thread's file, or returns ErrNotFound.
+func (s *Store) OpenThreadFile(ns, name, file string) (*os.File, error) {
+	if err := validName(ns, name, file); err != nil {
+		return nil, err
+	}
+	return open(filepath.Join(s.threadDir(ns, name), file))
+}
+
+// UpdateThreadFile is an atomic read-modify-write of a small thread file. It
+// holds a per-file mutex, calls fn with the current content (nil when the file
+// does not exist) and atomically replaces the file with fn's result. An error
+// from fn is returned and nothing is written.
+func (s *Store) UpdateThreadFile(ns, name, file string, fn func(old []byte) ([]byte, error)) error {
+	if err := validName(ns, name, file); err != nil {
+		return err
+	}
+	e := s.lock(threadFileKey(ns, name, file))
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	path := filepath.Join(s.threadDir(ns, name), file)
+	old, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		old = nil
+	} else if err != nil {
+		return err
+	}
+	updated, err := fn(old)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(path, bytes.NewReader(updated), 0)
+}
+
+// RemoveThread deletes every file stored for the thread. Missing data is not an error.
+func (s *Store) RemoveThread(ns, name string) error {
+	if err := validName(ns, name); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(s.threadDir(ns, name)); err != nil {
+		return err
+	}
+	prefix := "thread/" + ns + "/" + name + "/"
+	s.locks.Range(func(k, _ any) bool {
+		if key, ok := k.(string); ok && strings.HasPrefix(key, prefix) {
+			s.locks.Delete(key)
+		}
+		return true
+	})
 	return nil
 }

@@ -24,11 +24,12 @@ import (
 	"strings"
 
 	"github.com/TechDufus/omp-operator/api/v1alpha1"
+	"github.com/TechDufus/omp-operator/internal/agentapi"
 	"github.com/TechDufus/omp-operator/internal/config"
 )
 
 // FinishTool is the built-in tool every session gets to report its result.
-const FinishTool = "finish"
+const FinishTool = agentapi.FinishToolName
 
 // Ready reasons reported by the OmpAction reconciler and returned by ValidateName.
 const (

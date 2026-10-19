@@ -255,3 +255,32 @@ func TestParse(t *testing.T) {
 		t.Fatal("expected a parse error")
 	}
 }
+
+func TestTitleFromReply(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"plain", "Added Greet.\nMore detail.", "Added Greet."},
+		{"leading blank lines", "\n\n  \nFixed the flake", "Fixed the flake"},
+		{"heading", "## Summary of changes\nbody", "Summary of changes"},
+		{"bullet and quote", "- > **Done** and dusted", "Done** and dusted"},
+		{"marker-only line skipped", "---\n# Title", "Title"},
+		{"inner markers kept", "Use a-b > c # d", "Use a-b > c # d"},
+		{"empty", "", ""},
+		{"only markers", "# * -\n>", ""},
+		{"cut at 80 runes", strings.Repeat("é", 100), strings.Repeat("é", 80)},
+		{"exactly 80", strings.Repeat("a", 80), strings.Repeat("a", 80)},
+		{"crlf", "Title\r\nbody", "Title"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := TitleFromReply(tt.in)
+			if got != tt.want {
+				t.Errorf("TitleFromReply(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			if n := utf8.RuneCountInString(got); n > 80 {
+				t.Errorf("%d runes, want at most 80", n)
+			}
+		})
+	}
+}

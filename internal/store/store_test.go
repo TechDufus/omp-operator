@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -431,20 +432,181 @@ func TestRemoveAgent(t *testing.T) {
 		if err := s.PutToolchain("ns", a, "h1", strings.NewReader("t")); err != nil {
 			t.Fatal(err)
 		}
+		if err := s.PutCloudToolchain("ns", a, "h1", strings.NewReader("t")); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := s.RemoveAgent("ns", "agent"); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{"continuity/ns/agent", "toolchains/ns/agent"} {
+	for _, p := range []string{"continuity/ns/agent", "toolchains/ns/agent", "cloud-toolchains/ns/agent"} {
 		if _, err := os.Stat(filepath.Join(dir, p)); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s still present: %v", p, err)
 		}
 	}
-	for _, p := range []string{"continuity/ns/keep", "toolchains/ns/keep"} {
+	for _, p := range []string{"continuity/ns/keep", "toolchains/ns/keep", "cloud-toolchains/ns/keep"} {
 		if _, err := os.Stat(filepath.Join(dir, p)); err != nil {
 			t.Errorf("%s removed: %v", p, err)
 		}
 	}
+}
+
+func TestCloudToolchainKeepsEightMostRecentlyUsed(t *testing.T) {
+	s, dir := newStore(t)
+	tdir := filepath.Join(dir, "cloud-toolchains", "ns", "agent")
+	age := func(hash string, ago time.Duration) {
+		t.Helper()
+		ts := time.Now().Add(-ago)
+		if err := os.Chtimes(filepath.Join(tdir, hash+".tar.gz"), ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Ten tarballs, h0 the oldest and h9 the newest.
+	for i := range 10 {
+		h := fmt.Sprintf("h%d", i)
+		if err := s.PutCloudToolchain("ns", "agent", h, strings.NewReader(h)); err != nil {
+			t.Fatal(err)
+		}
+		age(h, time.Duration(10-i)*time.Hour)
+	}
+	if _, err := s.OpenCloudToolchain("ns", "agent", "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("open missing = %v, want ErrNotFound", err)
+	}
+	// Using the oldest kept tarball makes it the newest.
+	if got := readOf(t)(s.OpenCloudToolchain("ns", "agent", "h2")); got != "h2" {
+		t.Fatalf("h2 = %q", got)
+	}
+	if err := s.PutCloudToolchain("ns", "agent", "new", strings.NewReader("new")); err != nil {
+		t.Fatal(err)
+	}
+	// h2 was touched, so the least recently used h3 goes: 8 remain.
+	want := "h2.tar.gz h4.tar.gz h5.tar.gz h6.tar.gz h7.tar.gz h8.tar.gz h9.tar.gz new.tar.gz"
+	got := listNames(t, tdir)
+	if len(got) != 8 {
+		t.Fatalf("kept %v, want 8 tarballs", got)
+	}
+	for n := range strings.FieldsSeq(want) {
+		if !slices.Contains(got, n) {
+			t.Errorf("%s was pruned; kept %v", n, got)
+		}
+	}
+	// A failed put prunes nothing.
+	if err := s.PutCloudToolchain("ns", "agent", "bad", &failingReader{data: []byte("x")}); err == nil {
+		t.Fatal("expected error")
+	}
+	if after := listNames(t, tdir); len(after) != 8 {
+		t.Fatalf("after failed put: %v", after)
+	}
+}
+
+func TestThreadFiles(t *testing.T) {
+	s, dir := newStore(t)
+	if _, err := s.OpenThreadFile("ns", "t1", "source.bundle"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("open missing = %v, want ErrNotFound", err)
+	}
+	if err := s.PutThreadFile("ns", "t1", "source.bundle", strings.NewReader("one"), 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutThreadFile("ns", "t1", "source.bundle", strings.NewReader("toolong"), 3); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversized put = %v, want ErrTooLarge", err)
+	}
+	if got := readOf(t)(s.OpenThreadFile("ns", "t1", "source.bundle")); got != "one" {
+		t.Fatalf("content after refused put = %q, want one", got)
+	}
+	if err := s.PutThreadFile("ns", "t1", "result.bundle", strings.NewReader("unbounded"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutThreadFile("ns", "t2", "source.bundle", strings.NewReader("other"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if names := listNames(t, filepath.Join(dir, "threads", "ns", "t1")); len(names) != 2 {
+		t.Fatalf("t1 files = %v, want no temp leftovers", names)
+	}
+
+	if err := s.RemoveThread("ns", "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.OpenThreadFile("ns", "t1", "source.bundle"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("after RemoveThread = %v, want ErrNotFound", err)
+	}
+	if got := readOf(t)(s.OpenThreadFile("ns", "t2", "source.bundle")); got != "other" {
+		t.Fatalf("other thread = %q, want it untouched", got)
+	}
+	if err := s.RemoveThread("ns", "missing"); err != nil {
+		t.Fatalf("removing a missing thread: %v", err)
+	}
+}
+
+func TestUpdateThreadFile(t *testing.T) {
+	s, _ := newStore(t)
+	boom := errors.New("boom")
+
+	if err := s.UpdateThreadFile("ns", "t", "turns.json", func(old []byte) ([]byte, error) {
+		if old != nil {
+			t.Errorf("old of a missing file = %q, want nil", old)
+		}
+		return []byte("a"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateThreadFile("ns", "t", "turns.json", func(old []byte) ([]byte, error) {
+		return append(old, 'b'), boom
+	}); !errors.Is(err, boom) {
+		t.Fatalf("fn error = %v, want boom", err)
+	}
+	if got := readOf(t)(s.OpenThreadFile("ns", "t", "turns.json")); got != "a" {
+		t.Fatalf("content after failed update = %q, want a", got)
+	}
+
+	// Concurrent increments lose no update.
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Go(func() {
+			err := s.UpdateThreadFile("ns", "t", "turns.json", func(old []byte) ([]byte, error) {
+				return append(old, 'x'), nil
+			})
+			if err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if got := readOf(t)(s.OpenThreadFile("ns", "t", "turns.json")); got != "a"+strings.Repeat("x", 16) {
+		t.Fatalf("after 16 concurrent updates = %q", got)
+	}
+}
+
+func TestThreadAndCloudToolchainNamesValidated(t *testing.T) {
+	s, dir := newStore(t)
+	for _, name := range []string{"", "..", "a/b", `a\b`, "a\x00b", strings.Repeat("a", 256)} {
+		r := strings.NewReader("x")
+		fn := func([]byte) ([]byte, error) { return nil, nil }
+		checks := map[string]error{
+			"PutThreadFile ns":      s.PutThreadFile(name, "t", "f", r, 0),
+			"PutThreadFile name":    s.PutThreadFile("ns", name, "f", r, 0),
+			"PutThreadFile file":    s.PutThreadFile("ns", "t", name, r, 0),
+			"UpdateThreadFile file": s.UpdateThreadFile("ns", "t", name, fn),
+			"UpdateThreadFile name": s.UpdateThreadFile("ns", name, "f", fn),
+			"RemoveThread":          s.RemoveThread("ns", name),
+			"PutCloudToolchain":     s.PutCloudToolchain("ns", name, "h", r),
+			"PutCloudToolchain h":   s.PutCloudToolchain("ns", "a", name, r),
+		}
+		_, checks["OpenThreadFile"] = s.OpenThreadFile("ns", "t", name)
+		_, checks["OpenCloudToolchain"] = s.OpenCloudToolchain("ns", "a", name)
+		for op, err := range checks {
+			if !errors.Is(err, ErrInvalidName) {
+				t.Errorf("%s(%q) = %v, want ErrInvalidName", op, name, err)
+			}
+		}
+	}
+	if names := listNames(t, dir); len(names) != 0 {
+		t.Fatalf("root not empty after refused operations: %v", names)
+	}
+}
+
+// readOf adapts the (file, error) result of an Open* call to readAll.
+func readOf(t *testing.T) func(*os.File, error) string {
+	return func(f *os.File, err error) string { return readAll(t, f, err) }
 }
 
 func TestStatfs(t *testing.T) {

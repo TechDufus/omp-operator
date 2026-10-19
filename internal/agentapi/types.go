@@ -63,8 +63,18 @@ const (
 	EnvGatewayToken = "OMP_GATEWAY_TOKEN"
 )
 
+// Thread sittings: where prepare finds the matched git host's auth (an AuthDir id)
+// and the shipped secret files.
+const (
+	// CloudGitAuthID is the AuthDir id of the thread's matched cloud.git host.
+	CloudGitAuthID = "cloud-git"
+	// ThreadSecretsDir holds the Secret <thread>-secrets file-<i> keys in the init container.
+	ThreadSecretsDir = RunDir + "/thread-secrets"
+)
+
 // AuthDir is where a git source's auth Secret keys are mounted in the init container.
-// id is "workspace" for the workspace, or the decimal index of the entry in spec.skills.
+// id is "workspace" for the workspace, "cloud-git" for a thread's git host, or the
+// decimal index of the entry in spec.skills.
 // Files inside: "ssh-privatekey" and "known_hosts" (SSH), or "token" (token auth).
 func AuthDir(id string) string { return RunDir + "/auth/" + id }
 
@@ -85,6 +95,9 @@ const (
 	AuthTokenFile      = "token"
 )
 
+// FinishToolName is the name of the finish tool every non-thread session gets.
+const FinishToolName = "finish"
+
 // Plan is what prepare needs: GET /v1/sessions/{ns}/{name}/plan and
 // GET /v1/agents/{ns}/{name}/plan (the latter fills only Workspace and Toolchain).
 type Plan struct {
@@ -95,6 +108,51 @@ type Plan struct {
 	Continuity *ContinuityPlan `json:"continuity,omitempty"`
 	// Kubeconfig is true when the agent sets serviceAccountName.
 	Kubeconfig bool `json:"kubeconfig,omitempty"`
+	// Thread is set for sittings of an OmpThread; Workspace and Links are then nil.
+	Thread *ThreadPlan `json:"thread,omitempty"`
+}
+
+// ThreadPlan is how prepare restores a thread's workspace and home.
+type ThreadPlan struct {
+	Name   string `json:"name"`
+	Branch string `json:"branch"`
+	// FetchURL is the URL prepare fetches the base from, without credentials;
+	// empty when no cloud.git host matches a non-http(s) remote.
+	FetchURL string `json:"fetchURL,omitempty"`
+	// RemoteURL is the raw remote URL, added as "origin" without credentials.
+	RemoteURL     string `json:"remoteURL,omitempty"`
+	BaseRef       string `json:"baseRef,omitempty"`
+	BaseCommit    string `json:"baseCommit,omitempty"`
+	HandoffCommit string `json:"handoffCommit"`
+	// HasSource, HasResult and HasSetup say which of GET thread/source, thread/result
+	// and thread/setup have content.
+	HasSource bool `json:"hasSource,omitempty"`
+	HasResult bool `json:"hasResult,omitempty"`
+	HasSetup  bool `json:"hasSetup,omitempty"`
+	// AuthDir, AuthType and Username describe the matched cloud.git host's auth
+	// (see AuthDir); empty when none matches.
+	AuthDir  string `json:"authDir,omitempty"`
+	AuthType string `json:"authType,omitempty"`
+	Username string `json:"username,omitempty"`
+	// SecretFiles are copied from ThreadSecretsDir/<Key> to <workspace>/<Path>.
+	SecretFiles []ThreadSecretFile `json:"secretFiles,omitempty"`
+	Author      ThreadAuthor       `json:"author"`
+	// Toolchain is set when the agent has spec.toolchain.
+	Toolchain *ToolchainPlan `json:"toolchain,omitempty"`
+}
+
+// ThreadSecretFile is one shipped secret file.
+type ThreadSecretFile struct {
+	// Key is the file name inside ThreadSecretsDir ("file-<i>").
+	Key string `json:"key"`
+	// Path is relative to the workspace.
+	Path string `json:"path"`
+}
+
+// ThreadAuthor is the git identity commits are made with.
+type ThreadAuthor struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
 }
 
 // WorkspacePlan is exactly one of Artifact or Git; nil Plan.Workspace means an empty dir.
@@ -176,6 +234,28 @@ type SessionConfig struct {
 	Redact []RedactSource `json:"redact,omitempty"`
 	// Continuity is true when the session has a continuityKey.
 	Continuity bool `json:"continuity,omitempty"`
+	// Thread is set for sittings of an OmpThread (spec.threadRef).
+	Thread *ThreadConfig `json:"thread,omitempty"`
+}
+
+// ThreadConfig is what the driver needs to serve the turns of a thread sitting.
+type ThreadConfig struct {
+	Name       string `json:"name"`
+	Branch     string `json:"branch"`
+	BaseCommit string `json:"baseCommit,omitempty"`
+	RepoName   string `json:"repoName"`
+	// LocalBranch is the branch checked out on the user's machine at handoff.
+	LocalBranch string `json:"localBranch,omitempty"`
+	// Thinking is the thread's thinking level; empty keeps the agent's.
+	Thinking string `json:"thinking,omitempty"`
+	// TurnTimeoutSeconds bounds one turn (limits.sessionTimeout).
+	TurnTimeoutSeconds int64 `json:"turnTimeoutSeconds"`
+	// IdleTimeoutSeconds is how long the sitting waits for the next turn (cloud.idleTimeout).
+	IdleTimeoutSeconds int64 `json:"idleTimeoutSeconds"`
+	// MaxSittingSeconds is the sitting's lifetime (cloud.maxSitting).
+	MaxSittingSeconds int64 `json:"maxSittingSeconds"`
+	// Push is true when the matched git host has push set.
+	Push bool `json:"push,omitempty"`
 }
 
 // ModelConfig mirrors spec.model.
@@ -207,6 +287,36 @@ type RedactSource struct {
 	Name string `json:"name"`
 	Env  string `json:"env,omitempty"`
 	File string `json:"file,omitempty"`
+	// Lines marks File as a key=value or key: value file: besides the whole content,
+	// each line's value (after the first '=' or ':', trimmed and unquoted, when at
+	// least 8 characters) is scrubbed.
+	Lines bool `json:"lines,omitempty"`
+}
+
+// TurnAssignment is the 200 response of GET /v1/sessions/{ns}/{name}/thread/next.
+type TurnAssignment struct {
+	ID   int    `json:"id"`
+	Text string `json:"text"`
+}
+
+// TurnComplete is POSTed to /v1/sessions/{ns}/{name}/thread/turns/{id}/complete.
+type TurnComplete struct {
+	// Outcome is OutcomeCompleted or OutcomeError; a turn that ends retryably or
+	// for auth is not completed, it stays running and is redelivered.
+	Outcome string `json:"outcome"`
+	Error   string `json:"error,omitempty"`
+	// Reply is the agent's last assistant text, at most 20000 characters.
+	Reply string `json:"reply,omitempty"`
+	Usage Usage  `json:"usage"`
+	// Head is the result branch tip after the turn.
+	Head         string `json:"head,omitempty"`
+	FilesChanged int    `json:"filesChanged,omitempty"`
+	Insertions   int    `json:"insertions,omitempty"`
+	Deletions    int    `json:"deletions,omitempty"`
+	// Pushed is true when Head was pushed to the thread's remote; PushError is why
+	// not (at most 300 characters).
+	Pushed    bool   `json:"pushed,omitempty"`
+	PushError string `json:"pushError,omitempty"`
 }
 
 // ActionResult is the response of POST /v1/sessions/{ns}/{name}/actions/{tool}.
