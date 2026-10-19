@@ -8,7 +8,7 @@ kubectl = "1.37.1"
 yq = "4.54.1"
 
 [env]
-OMP_VERSION = "v18.12.1"
+OMP_VERSION = "v18.12.2"
 
 [tasks.generate]
 description = "Generate DeepCopy methods"
@@ -96,8 +96,8 @@ run = 'docker build -f images/runtime/Dockerfile -t "${RUNTIME_IMG:-omp-operator
 description = "Build the e2e runtime image (driver + fake omp)"
 run = 'docker build -f images/e2e/Dockerfile -t "${E2E_IMG:-omp-operator-e2e:dev}" .'
 
-[tasks.ompcompat]
-description = "Run compatibility tests against the pinned real omp"
+[tasks."omp:download"]
+description = "Download the pinned omp release into bin/omp-linux-x64 (checksum-verified)"
 shell = "bash -c"
 run = '''
 set -euo pipefail
@@ -110,6 +110,14 @@ if [ ! -x bin/omp-linux-x64 ] || [ "$(cat bin/omp-linux-x64.version 2>/dev/null)
   chmod +x bin/omp-linux-x64
   echo "$OMP_VERSION" > bin/omp-linux-x64.version
 fi
+'''
+
+[tasks.ompcompat]
+description = "Run compatibility tests against the pinned real omp"
+depends = ["omp:download"]
+shell = "bash -c"
+run = '''
+set -euo pipefail
 OMP_BIN="$PWD/bin/omp-linux-x64" go test -tags ompcompat ./test/ompcompat/ -v -count=1
 '''
 

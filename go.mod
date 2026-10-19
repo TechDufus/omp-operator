@@ -3,7 +3,7 @@ module github.com/TechDufus/omp-operator
 go 1.27.0
 
 require (
-	github.com/can1357/oh-my-pi/sdk/go/omp-rpc v0.0.0-20261017230136-291e055836c2
+	github.com/can1357/oh-my-pi/sdk/go/omp-rpc v0.0.0-20261018205142-1d5aff90b057
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/fluxcd/pkg/apis/meta v1.30.2
 	github.com/fluxcd/source-controller/api v1.9.6

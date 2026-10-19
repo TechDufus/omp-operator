@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/omp-operator-driver .
 
 FROM ${DEBIAN_IMAGE}
 
-ARG OMP_VERSION=v18.12.1
+ARG OMP_VERSION=v18.12.2
 ARG MISE_VERSION=v2026.10.12
 
 LABEL org.opencontainers.image.source="https://github.com/TechDufus/omp-operator" \

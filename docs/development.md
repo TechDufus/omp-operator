@@ -31,7 +31,8 @@ behind the others.
 | `docker-build` | | Controller image (`IMG`, default `omp-operator:dev`) |
 | `docker-build-runtime` | | Runtime image (`RUNTIME_IMG`, default `omp-operator-runtime:dev`) |
 | `docker-build-e2e` | | e2e image: the driver plus `test/fakeomp` installed as `omp` (`E2E_IMG`, default `omp-operator-e2e:dev`) |
-| `ompcompat` | | Downloads the pinned omp release into `bin/`, checks it against the release's `SHA256SUMS.txt`, and runs `test/ompcompat` against it |
+| `omp:download` | | Downloads the pinned omp release (`OMP_VERSION`) to `bin/omp-linux-x64` and checks it against the release's `SHA256SUMS.txt` |
+| `ompcompat` | `omp:download` | Runs `test/ompcompat` against the downloaded omp |
 | `test-e2e` | `docker-build`, `docker-build-e2e` | Creates a kind cluster `omp-operator-e2e` (unless it exists) with its own kubeconfig in `bin/` (your `~/.kube/config` is never touched), runs the e2e suite, and deletes the cluster on exit |
 | `dev:up` | | Creates (unless it exists) or updates the long-lived kind cluster `omp-dev`; see [dev cluster](#dev-cluster) |
 | `dev:login [anthropic\|openai-codex]` | | Logs the dev cluster's auth gateway in to a subscription |

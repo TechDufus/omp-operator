@@ -38,7 +38,7 @@ const (
 	ReasonMissingSecret = "MissingSecret"
 )
 
-// ReservedToolNames are the tool names omp v18.12.1 registers itself (the built-in and
+// ReservedToolNames are the tool names omp v18.12.2 registers itself (the built-in and
 // hidden tools of its tool registry, plus names of internal tools) and the operator's
 // finish. An OmpAction whose tool name is in this list is not Ready. test/ompcompat checks
 // that every tool omp reports is in this list.
