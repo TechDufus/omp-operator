@@ -36,7 +36,9 @@ behind the others.
 | `test-e2e` | `omp:download`, `docker-build`, `docker-build-e2e` | Creates a kind cluster `omp-operator-e2e` (unless it exists) with its own kubeconfig in `bin/` (your `~/.kube/config` is never touched), runs the e2e suite with `OMP_BIN` set to the downloaded omp, and deletes the cluster on exit |
 | `dev:up` | | Creates (unless it exists) or updates the long-lived kind cluster `omp-dev`; see [dev cluster](#dev-cluster) |
 | `dev:login [anthropic\|openai-codex]` | | Logs the dev cluster's auth gateway in to a subscription |
-| `dev:status` | | Operator pods, agents, triggers and sessions of the dev cluster |
+| `dev:status` | | Operator pods, agents, triggers, sessions and threads of the dev cluster |
+| `dev:github-token` | | Stores your `gh auth token` as Secret `omp-dev/github-token`, which agent `coder` pushes with (no docker needed) |
+| `dev:client` | | Links `clients/omp-cloud` into `~/.omp/agent/extensions` and writes `~/.omp/agent/cloud.json` for the dev cluster |
 | `dev:down` | | Deletes the dev cluster and `bin/dev` |
 
 `mise run run` starts the manager, which needs `POD_NAMESPACE` (it refuses to start without it) and a writable
@@ -48,21 +50,26 @@ data directory (the default `/data` usually is not). With explicit flags:
 
 `mise run dev:up` keeps a kind cluster `omp-dev` around for real use. It builds the three images with a fresh
 `dev-<epoch>` tag, loads them into kind, installs the chart with `hack/dev/values.yaml` (auth gateway on, agents
-in namespace `omp-dev`) and applies every other manifest in `hack/dev/` (a NodePort Service and the sample agent
-`hello`). It is idempotent: run it again after a code change. Everything uses `bin/dev/kubeconfig`, never
-`~/.kube/config`:
+in namespace `omp-dev`, the cloud API token from `bin/dev/token`) and applies every other manifest in `hack/dev/`
+(a NodePort Service, the sample agent `hello`, and the cloud agents `coder` and `coder-fake`). It is idempotent:
+run it again after a code change. Everything uses `bin/dev/kubeconfig`, never `~/.kube/config`:
 
-- dashboard `http://127.0.0.1:30080`, user `dev`, password in `bin/dev/password`
+- dashboard and cloud API `http://127.0.0.1:30080`, user `dev`, password in `bin/dev/password`
 - webhooks `http://127.0.0.1:30082/hooks/<namespace>/<trigger>`
-- `bin/dev/token` is a random token for API clients
+- `bin/dev/token` is the cloud API bearer token (principal `token:dev`, operator in every namespace)
 
 `mise run dev:login` logs the gateway in to a Claude subscription (`openai-codex` for ChatGPT); the login
 survives `dev:up` and lasts until `dev:down`.
 
+To use cloud agents from your own omp: `mise run dev:github-token` (so `coder` can push `omp-cloud/*` branches
+to GitHub), then `mise run dev:client`. In any omp session inside a git repository, `/cloud <task>` hands the
+conversation to `coder`; `/cloud help` lists the other verbs. `coder-fake` runs fakeomp on the e2e image for
+trying the flow without a model (set `"agent": "coder-fake"` in `~/.omp/agent/cloud.json`).
+
 ## Layout
 
 ```text
-api/v1alpha1/        the four kinds
+api/v1alpha1/        the five kinds
 cmd/main.go          the manager: controllers, hooks, dashboard and agent API servers
 cmd/driver/          omp-operator-driver: prepare, run and toolsync inside pods, and the gitpush sidecar of cloud thread pods
 internal/controller/ one reconciler per kind

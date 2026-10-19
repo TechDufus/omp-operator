@@ -1,0 +1,31 @@
+# The real-model cloud agent your local omp hands work to with /cloud (mise run dev:client).
+# It pushes omp-cloud/<thread> branches to github.com with the token from mise run dev:github-token.
+apiVersion: omp.techdufus.com/v1alpha1
+kind: OmpAgent
+metadata:
+  name: coder
+  namespace: omp-dev
+spec:
+  model:
+    default: anthropic/claude-sonnet-5-5
+    gateway:
+      url: http://omp-auth.omp-system.svc:4000
+      allowedModels: ["anthropic/*", "openai-codex/*"]
+  tools:
+    allow: ["*"]
+  toolchain: {}
+  limits:
+    sessionTimeout: 60m
+    maxConcurrentSessions: 4
+    retryDelay: 1m
+  pod:
+    resources:
+      requests: {cpu: 500m, memory: 1Gi}
+      limits: {memory: 8Gi}
+  cloud:
+    idleTimeout: 5m
+    git:
+      - host: github.com
+        auth:
+          tokenSecretRef: {name: github-token, key: token}
+        push: true

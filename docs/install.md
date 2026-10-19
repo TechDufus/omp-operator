@@ -24,13 +24,13 @@ Both tags default to the chart's `appVersion` (`v0.1.0` for chart `0.1.0`).
 
 | Object | Notes |
 |---|---|
-| CRDs `ompagents`, `omptriggers`, `ompsessions`, `ompactions` | From the chart's `crds/` directory |
+| CRDs `ompagents`, `omptriggers`, `ompsessions`, `ompactions`, `ompthreads` | From the chart's `crds/` directory |
 | Deployment `omp-operator` | 1 replica, strategy `Recreate`, no leader election. Runs as UID/GID 65532 with a read-only root filesystem, all capabilities dropped and the `RuntimeDefault` seccomp profile |
 | Service `omp-operator` | Ports `web` 8080, `hooks` 8082, `agent` 8083, `metrics` 9090 |
 | PVC `omp-operator-data` | Mounted at `/data`: session files, transcripts, continuity and toolchain tarballs |
 | ConfigMap `omp-operator-access` | The dashboard access file rendered from `dashboard.*`. A checksum annotation restarts the operator when it changes |
 | ServiceAccount `omp-operator` | |
-| ClusterRole `<release>-omp-operator-manager` and its binding | Cluster-scoped rules generated from the code's RBAC markers: the four CRDs, Flux sources (get, list, watch, patch), Kustomizations and HelmReleases (get, patch), Deployments, StatefulSets and DaemonSets (get, patch), Events (create, patch) |
+| ClusterRole `<release>-omp-operator-manager` and its binding | Cluster-scoped rules generated from the code's RBAC markers: the five CRDs, Flux sources (get, list, watch, patch), Kustomizations and HelmReleases (get, patch), Deployments, StatefulSets and DaemonSets (get, patch), Events (create, patch) |
 | Role or ClusterRole `<release>-omp-operator-namespaced` and bindings | Pods (get, list, watch, create, delete), Secrets (get, create, update, patch, delete), ConfigMaps (get). See [namespaces and RBAC](#namespaces-and-rbac) |
 | With `authGateway.enabled`: Deployment, Service and PVC `omp-auth` | The model auth-gateway and its credential broker. See [model access](model-access.md) |
 

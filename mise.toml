@@ -190,6 +190,10 @@ done
 go run ./hack/dev/htpasswd dev bin/dev/password \
   | kubectl -n omp-system create secret generic omp-dev-basic --from-file=htpasswd=/dev/stdin --dry-run=client -o yaml \
   | kubectl apply -f -
+kubectl -n omp-system create secret generic omp-dev-token --from-file=token=bin/dev/token --dry-run=client -o yaml \
+  | kubectl apply -f -
+# Helm installs crds/ only on first install; apply them every time so API changes land.
+kubectl apply --server-side --force-conflicts -f charts/omp-operator/crds
 helm upgrade --install omp charts/omp-operator -n omp-system -f hack/dev/values.yaml \
   --set image.repository=omp-operator --set image.tag="$TAG" \
   --set runtimeImage.repository=omp-operator-runtime --set runtimeImage.tag="$TAG" \
@@ -228,18 +232,64 @@ kubectl -n omp-system rollout status deploy/omp-auth --timeout 5m
 '''
 
 [tasks."dev:status"]
-description = "Show the dev cluster's operator pods, agents, triggers and sessions"
+description = "Show the dev cluster's operator pods, agents, triggers, sessions and threads"
 shell = "bash -c"
 run = '''
 set -euo pipefail
 export KUBECONFIG="$PWD/bin/dev/kubeconfig"
 kubectl get pods -n omp-system
-kubectl get ompagents,omptriggers,ompsessions -A
+kubectl get ompagents,omptriggers,ompsessions,ompthreads -A
 echo
 echo "dashboard: http://127.0.0.1:30080 (user dev)"
 echo "webhooks:  http://127.0.0.1:30082"
 echo "password:  $PWD/bin/dev/password"
 echo "token:     $PWD/bin/dev/token"
+'''
+
+[tasks."dev:github-token"]
+description = "Store your gh token as Secret omp-dev/github-token (cloud git push to github.com); no docker needed"
+shell = "bash -c"
+run = '''
+set -euo pipefail
+export KUBECONFIG="$PWD/bin/dev/kubeconfig"
+gh auth token \
+  | kubectl -n omp-dev create secret generic github-token --from-file=token=/dev/stdin --dry-run=client -o yaml \
+  | kubectl apply -f -
+'''
+
+[tasks."dev:client"]
+description = "Point your local omp at the dev cluster: link the omp-cloud extension and write ~/.omp/agent/cloud.json"
+shell = "bash -c"
+run = '''
+set -euo pipefail
+agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}"
+mkdir -p "$agent_dir/extensions"
+link="$agent_dir/extensions/omp-cloud"
+target="$PWD/clients/omp-cloud"
+if [ -L "$link" ] || [ -e "$link" ]; then
+  if [ "$(readlink "$link")" != "$target" ]; then
+    echo "$link exists and does not point at $target; remove it first" >&2
+    exit 1
+  fi
+else
+  ln -s "$target" "$link"
+fi
+url="http://127.0.0.1:30080"
+cfg="$agent_dir/cloud.json"
+if [ -e "$cfg" ]; then
+  have="$(yq -p json -o json '.url // ""' "$cfg" | tr -d '"')"
+  if [ "$have" != "$url" ]; then
+    echo "$cfg points at $have; to use the dev cluster set this line in it:" >&2
+    echo "  \"url\": \"$url\"," >&2
+    exit 1
+  fi
+fi
+umask 077
+printf '{"url":"%s","tokenCommand":["cat","%s"],"namespace":"omp-dev","agent":"coder","excludeExtensions":["herd.ts","herdr-omp-agent-state.ts"]}\n' \
+  "$url" "$PWD/bin/dev/token" > "$cfg"
+chmod 0600 "$cfg"
+echo "linked $link -> $target"
+echo "wrote $cfg"
 '''
 
 [tasks."dev:down"]

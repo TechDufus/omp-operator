@@ -1,0 +1,14 @@
+# A cloud agent on the e2e image (fakeomp instead of omp): exercises /cloud without a model.
+apiVersion: omp.techdufus.com/v1alpha1
+kind: OmpAgent
+metadata:
+  name: coder-fake
+  namespace: omp-dev
+spec:
+  image: omp-operator-e2e:__DEV_TAG__
+  model:
+    default: anthropic/claude-sonnet-5-5
+  tools:
+    allow: ["*"]
+  cloud:
+    idleTimeout: 2m

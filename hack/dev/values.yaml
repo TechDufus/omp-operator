@@ -5,6 +5,9 @@ persistence: {size: 10Gi}
 dashboard:
   url: http://127.0.0.1:30080
   basic: {existingSecret: omp-dev-basic}
+  # Cloud API token: bin/dev/token, stored by dev:up as Secret omp-dev-token.
+  apiTokens:
+    - {name: dev, existingSecret: omp-dev-token}
   access:
-    - {users: ["basic:dev"], namespaces: ["*"], role: viewer}
+    - {users: ["basic:dev", "token:dev"], namespaces: ["*"], role: operator}
 hooks: {publicURL: http://127.0.0.1:30082}

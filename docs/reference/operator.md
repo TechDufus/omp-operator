@@ -81,9 +81,9 @@ Cluster-scoped rules, from the code's markers (`config/rbac/role.yaml`, copied t
 
 | API group | Resources | Verbs |
 |---|---|---|
-| `omp.techdufus.com` | `ompagents`, `omptriggers`, `ompsessions`, `ompactions` | create, delete, get, list, patch, update, watch |
-| `omp.techdufus.com` | the four kinds' `/status` | get, patch, update |
-| `omp.techdufus.com` | the four kinds' `/finalizers` | update |
+| `omp.techdufus.com` | `ompagents`, `omptriggers`, `ompsessions`, `ompactions`, `ompthreads` | create, delete, get, list, patch, update, watch |
+| `omp.techdufus.com` | the five kinds' `/status` | get, patch, update |
+| `omp.techdufus.com` | the five kinds' `/finalizers` | update |
 | `source.toolkit.fluxcd.io` | `gitrepositories`, `ocirepositories`, `helmrepositories` | get, list, patch, watch |
 | `kustomize.toolkit.fluxcd.io` | `kustomizations` | get, patch |
 | `helm.toolkit.fluxcd.io` | `helmreleases` | get, patch |
