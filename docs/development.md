@@ -25,7 +25,10 @@ behind the others.
 | `verify-generated` | `chart-sync` | Fails when `git status --porcelain` shows anything, i.e. generated files are stale. Run it after committing |
 | `lint` | `generate` | `golangci-lint run` |
 | `test` | `manifests` | `go vet`, then the unit, envtest and chart tests of every package except `test/e2e` and `test/ompcompat`, with coverage in `cover.out`. Provides the envtest control plane through `setup-envtest` |
-| `ci` | `lint`, `test`, `chart-sync` | The above, then `helm lint charts/omp-operator` |
+| `client:deps`, `client:test`, `client:typecheck` | | `bun install --frozen-lockfile`, `bun test` and `tsc --noEmit` for `clients/omp-cloud` |
+| `release:check` | | Fails unless the `omp-cloud` plugin's `package.json` version, its catalog `version` and `source.ref` (`v<version>`) agree, and with `TAG` set that the tag is `v<version>` |
+| `release:bump <X.Y.Z>` | | Writes a new release version into the plugin, its catalog entry and the docs' `--version`; see [CI and releases](#ci-and-releases) |
+| `ci` | `lint`, `test`, `chart-sync`, `client:test`, `client:typecheck`, `release:check` | The above, then `helm lint charts/omp-operator` |
 | `build` | `generate` | Builds `bin/manager` and `bin/omp-operator-driver` |
 | `run` | `manifests` | Runs the manager against your current kubeconfig (set `POD_NAMESPACE`; see below) |
 | `docker-build` | | Controller image (`IMG`, default `omp-operator:dev`) |
@@ -183,3 +186,15 @@ to `ghcr.io/techdufus/`, signs them by digest with keyless cosign, packages the 
 writes the three digests to the job summary and creates a GitHub release with the chart attached. GHCR
 packages are private on first push; make each public once in its package settings. See
 [install](install.md#verify-the-release-signatures) for verification.
+
+The `omp-cloud` plugin is versioned with the operator, and its catalog entry pins the release tag. Cut a release:
+
+```sh
+mise run release:bump 0.3.0   # clients/omp-cloud/package.json, the catalog's version and ref, docs' --version
+git commit -am "Release v0.3.0"
+git tag -s v0.3.0 -m v0.3.0
+git push --atomic origin main v0.3.0   # the catalog names the tag; push both at once
+```
+
+`mise run release:check` (part of `ci`) fails when the plugin's `package.json` version, its catalog `version` and
+`source.ref` disagree; `release.yml` runs it with the tag and refuses a tag that is not `v<plugin version>`.

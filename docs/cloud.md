@@ -188,9 +188,20 @@ omp plugin marketplace add TechDufus/omp-operator
 omp plugin install omp-cloud@omp-operator
 ```
 
-The extension (`clients/omp-cloud`) has no runtime npm dependencies. To work on it, or to use a checkout, link the
-directory instead: `ln -s <repo>/clients/omp-cloud ~/.omp/agent/extensions/omp-cloud`
-(`mise run dev:client` does that for the dev cluster). The extension never ships itself to the cloud.
+The plugin's version is the operator's: `omp-cloud@omp-operator` 0.2.0 is the code of tag `v0.2.0`. The catalog
+(`.omp-plugin/marketplace.json`) pins each release to its tag, so work on `main` never reaches installed copies.
+
+Updates: with `marketplace.autoUpdate: auto` in `~/.omp/agent/config.yml`, omp upgrades the plugin when an
+interactive session starts and the catalog lists a newer version. omp refreshes the catalog once it is 24 hours
+old, so a release arrives within a day; to take it at once, run
+`omp plugin marketplace update omp-operator && omp plugin upgrade omp-cloud@omp-operator`. omp's default,
+`notify`, only writes the available update to its debug log.
+
+The extension (`clients/omp-cloud`) has no runtime npm dependencies. To work on it, link a checkout instead:
+`ln -s <repo>/clients/omp-cloud ~/.omp/agent/extensions/omp-cloud` (`mise run dev:client` does that for the dev
+cluster). Install one or the other, never both: each copy registers `/cloud`, only the first loaded is used and you
+cannot tell which. Switch with `omp plugin uninstall omp-cloud@omp-operator` or by removing the link. The extension
+never ships itself to the cloud.
 
 ## Configure the extension
 

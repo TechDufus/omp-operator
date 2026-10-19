@@ -69,7 +69,7 @@ go test $(go list ./... | grep -v -e /test/e2e -e /test/ompcompat) -coverprofile
 
 [tasks.ci]
 description = "Lint, test and lint the chart"
-depends = ["lint", "test", "chart-sync", "client:test", "client:typecheck"]
+depends = ["lint", "test", "chart-sync", "client:test", "client:typecheck", "release:check"]
 run = "helm lint charts/omp-operator"
 
 [tasks."client:deps"]
@@ -88,6 +88,48 @@ description = "Typecheck the omp-cloud extension"
 depends = ["client:deps"]
 dir = "clients/omp-cloud"
 run = "bunx tsc --noEmit -p ."
+
+[tasks."release:check"]
+description = "Fail unless the omp-cloud plugin version, its marketplace entry and (with TAG=vX.Y.Z) the release tag agree"
+shell = "bash -c"
+run = '''
+set -euo pipefail
+catalog=.omp-plugin/marketplace.json
+pkg="$(yq -p json -o yaml '.version' clients/omp-cloud/package.json)"
+ver="$(yq -p json -o yaml '.plugins[] | select(.name == "omp-cloud") | .version' "$catalog")"
+ref="$(yq -p json -o yaml '.plugins[] | select(.name == "omp-cloud") | .source.ref' "$catalog")"
+fail=0
+[ "$ver" = "$pkg" ] || { echo "$catalog: omp-cloud version $ver != clients/omp-cloud/package.json $pkg" >&2; fail=1; }
+[ "$ref" = "v$pkg" ] || { echo "$catalog: omp-cloud source.ref $ref != v$pkg" >&2; fail=1; }
+if [ -n "${TAG:-}" ] && [ "$TAG" != "v$pkg" ]; then
+  echo "tag $TAG != plugin version v$pkg; run mise run release:bump ${TAG#v} and commit before tagging" >&2
+  fail=1
+fi
+exit "$fail"
+'''
+
+[tasks."release:bump"]
+description = "Set the release version: omp-cloud package.json, its marketplace entry (version and tag ref) and the docs' chart version"
+usage = 'arg "<version>" help="the new version without v, e.g. 0.3.0"'
+shell = "bash -c"
+run = '''
+set -euo pipefail
+new="${usage_version}"
+[[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be X.Y.Z, got $new" >&2; exit 2; }
+old="$(yq -p json -o yaml '.version' clients/omp-cloud/package.json)"
+[ "$new" != "$old" ] || { echo "already at $new" >&2; exit 1; }
+oldre="${old//./\\.}"
+sed -i "0,/\"version\": \"$oldre\"/s//\"version\": \"$new\"/" clients/omp-cloud/package.json
+NEW="$new" yq -i -p json -o json \
+  '(.plugins[] | select(.name == "omp-cloud")) |= (.version = strenv(NEW) | .source.ref = "v" + strenv(NEW))' \
+  .omp-plugin/marketplace.json
+for f in README.md docs/*.md; do
+  sed -i -e "s/--version $oldre\b/--version $new/g" \
+    -e "s/\`v$oldre\` for chart \`$oldre\`/\`v$new\` for chart \`$new\`/g" "$f"
+done
+mise run release:check
+echo "bumped $old -> $new; commit, then: git tag -s v$new -m v$new && git push --atomic origin main v$new"
+'''
 
 [tasks.build]
 description = "Build the manager and the in-pod driver"
@@ -263,6 +305,11 @@ shell = "bash -c"
 run = '''
 set -euo pipefail
 agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}"
+# The marketplace plugin and this link would both register /cloud; only one copy may be installed.
+if command -v omp >/dev/null && omp plugin list 2>/dev/null | grep -q 'omp-cloud@'; then
+  echo "the omp-cloud marketplace plugin is installed; run omp plugin uninstall omp-cloud@omp-operator first" >&2
+  exit 1
+fi
 mkdir -p "$agent_dir/extensions"
 link="$agent_dir/extensions/omp-cloud"
 target="$PWD/clients/omp-cloud"

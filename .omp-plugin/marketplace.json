@@ -6,7 +6,16 @@
   "plugins": [
     {
       "name": "omp-cloud",
-      "source": "./clients/omp-cloud"
+      "description": "Hand omp conversations off to cloud agents running on omp-operator (/cloud)",
+      "version": "0.2.0",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/TechDufus/omp-operator.git",
+        "path": "clients/omp-cloud",
+        "ref": "v0.2.0"
+      },
+      "homepage": "https://github.com/TechDufus/omp-operator/blob/main/docs/cloud.md",
+      "license": "Apache-2.0"
     }
   ]
 }
