@@ -15,7 +15,7 @@ Images, all `linux/amd64`:
 
 | Image | Used for |
 |---|---|
-| `ghcr.io/techdufus/omp-operator` | The operator (controllers, hooks, dashboard, agent API) |
+| `ghcr.io/techdufus/omp-operator` | The operator (controllers, hooks, dashboard, cloud API, agent API) |
 | `ghcr.io/techdufus/omp-operator-runtime` | Session pods, toolsync pods and the auth-gateway. Holds `omp`, `mise`, `git`, `ssh`, `jq`, `python3` and `omp-operator-driver` |
 
 Both tags default to the chart's `appVersion` (`v0.1.0` for chart `0.1.0`).
@@ -55,6 +55,8 @@ dashboard:
          scopes: [openid, email, profile, groups], usernameClaim: email, groupsClaim: groups}
   basic: {existingSecret: ""}
   access: []
+  apiTokens: []    # cloud API bearer tokens, see below
+cloud: {maxUploadBytes: 1073741824}
 hooks: {publicURL: ""}
 actions: {targetNamespaces: []}
 persistence: {storageClass: "", size: 20Gi}
@@ -124,6 +126,20 @@ OIDC needs `dashboard.url` (the external URL; the redirect URL is `<url>/auth/ca
 (`dashboard.oidc.clientSecret.existingSecret`, key `dashboard.oidc.clientSecret.key`). The chart fails to
 render when one of them is missing.
 
+## Cloud agents
+
+Cloud agents (`/cloud` from a local omp, see [cloud agents](cloud.md)) need three things from the install:
+
+- **API tokens.** The cloud API is off until `dashboard.apiTokens` has an entry, each granted `viewer` or
+  `operator` on namespaces by `dashboard.access` as `token:<name>`. Create the token Secret (key `token`) in the
+  release namespace, then reference it with `existingSecret`. See [dashboard](dashboard.md#api-tokens).
+- **A route to the API.** It is served on the `web` port under `/api/`: the same Ingress, Gateway route or
+  port-forward as the dashboard.
+- **Storage.** Threads keep their uploads and results on the data volume, see [storage](#storage). Size
+  `persistence.size` for the repositories you hand off; `cloud.maxUploadBytes` (default 1 GiB) caps one bundle.
+
+The agent side is [`spec.cloud`](reference/ompagent.md#cloud) on an `OmpAgent`.
+
 ## Exposing the hooks and the dashboard
 
 Both are plain HTTP Services; put your own Ingress, Gateway API route or tunnel in front and terminate
@@ -132,15 +148,18 @@ TLS there. The dashboard sets `Secure` cookies, so use HTTPS for OIDC sign-in.
 | Service port | Serves | Expose it? |
 |---|---|---|
 | `hooks` 8082 | `POST /hooks/<namespace>/<trigger>` | Yes, to the systems that send webhooks. Set `hooks.publicURL` so the dashboard shows the full URL |
-| `web` 8080 | The dashboard | Yes, to people. Set `dashboard.url` so notifications link to it |
+| `web` 8080 | The dashboard, and the [cloud API](reference/cloud-api.md) under `/api/` | Yes, to people and to the omp clients that use `/cloud`. Set `dashboard.url` so notifications link to it |
 | `agent` 8083 | The API session pods use | **No.** Cluster-internal only. See [security](security.md#network-policy) |
 | `metrics` 9090 | Prometheus metrics, plain HTTP | To your monitoring system only |
 
 ## Storage
 
 `persistence` sizes the PVC at `/data`. It holds transcripts, event logs, continuity tarballs (at most 64
-MiB each) and toolchain tarballs (at most 2 GiB each, the current and the previous per agent). Losing it
-loses transcripts, continuity and toolchains but no configuration. The metrics
+MiB each), toolchain tarballs (at most 2 GiB each, the current and the previous per agent), and for cloud
+threads, until they are deleted, each thread's uploaded repository bundle (up to `cloud.maxUploadBytes`), setup
+archive and conversation, its result bundle (at most 1 GiB) and its turn log, plus each cloud agent's
+repository toolchain cache (the newest 8 archives). Losing it
+loses transcripts, continuity, toolchains and threads but no configuration. The metrics
 `omp_operator_data_free_bytes` and `omp_operator_data_capacity_bytes` track it. The access mode is
 `ReadWriteOnce` and the operator runs as a single replica.
 

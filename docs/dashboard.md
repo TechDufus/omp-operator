@@ -73,7 +73,8 @@ not exist, is a plain `404`.
 `name` (lowercase letters, digits and `-`, unique) and exactly one of `sha256` (hex sha256 of the token) or
 `tokenFile` (read at start, trimmed, at least 32 characters). A token named `laptop` is the principal `token:laptop`
 in rules; give it `role: operator` to let it create threads. Without any `apiTokens` the API answers
-`503 cloud API not configured`. Generate a token with `openssl rand -hex 32` and keep it in a Secret.
+`503 cloud API not configured`. Generate a token with `openssl rand -hex 32` and keep it in a Secret. The guide to
+using the tokens from a local omp is [cloud agents](cloud.md#api-tokens-and-access).
 
 ## Sign-in
 
