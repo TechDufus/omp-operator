@@ -19,7 +19,7 @@ against your gateway and only for the allowed models.
 The chart ships the gateway as an opt-in component:
 
 ```sh
-helm upgrade --install omp oci://ghcr.io/techdufus/charts/omp-operator --version 0.2.0 \
+helm upgrade --install omp oci://ghcr.io/techdufus/charts/omp-operator --version 0.2.1 \
   -n omp-system --create-namespace --reuse-values --set authGateway.enabled=true
 ```
 

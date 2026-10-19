@@ -61,7 +61,7 @@ kubectl -n omp-system create secret generic omp-cloud-laptop --from-file=token="
 
 # 2. Let the operator accept it (see "API tokens and access" below). The token Secret lives in the operator's
 #    namespace. Helm replaces lists, so dashboard.access must hold your existing rules too.
-helm upgrade omp oci://ghcr.io/techdufus/charts/omp-operator --version 0.2.0 -n omp-system --reuse-values \
+helm upgrade omp oci://ghcr.io/techdufus/charts/omp-operator --version 0.2.1 -n omp-system --reuse-values \
   -f - <<'EOF'
 dashboard:
   apiTokens:
