@@ -140,7 +140,7 @@ func (d *Driver) runAgent(ctx context.Context, cfg agentapi.SessionConfig, red *
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		events.drain(client.Frames())
+		events.drain(client.Frames(), nil)
 	}()
 
 	done := d.play(ctx, client, cfg, state, events, deadline)

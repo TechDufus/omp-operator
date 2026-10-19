@@ -50,6 +50,8 @@ const (
 	eventTurn       = "turn"
 	eventToolchain  = "toolchain"
 	eventGit        = "git"
+	eventQuestion   = "question"
+	eventAnswer     = "answer"
 )
 
 // eventSink batches progress events and posts them every interval. Everything it
@@ -117,10 +119,15 @@ func (s *eventSink) flush() {
 	}
 }
 
-// drain turns omp's frames into events until the connection ends.
-func (s *eventSink) drain(frames <-chan omprpc.RpcServerFrame) {
+// drain turns omp's frames into events until the connection ends. onUI, when set, receives
+// every extension UI request; it must not block.
+func (s *eventSink) drain(frames <-chan omprpc.RpcServerFrame, onUI func(omprpc.ExtensionUiRequest)) {
 	for frame := range frames {
 		switch ev := frame.Value.(type) {
+		case omprpc.ExtensionUiRequest:
+			if onUI != nil {
+				onUI(ev)
+			}
 		case omprpc.ToolExecutionStartEvent:
 			args := truncate(s.red.String(string(ev.Args)), maxToolArgs)
 			s.add(eventTool, strings.TrimSpace(ev.ToolName+" "+args))

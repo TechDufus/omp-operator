@@ -356,3 +356,43 @@ func (c *Client) ThreadStop(ctx context.Context) (bool, error) {
 func (c *Client) CompleteTurn(ctx context.Context, id int, done agentapi.TurnComplete) error {
 	return c.doJSON(ctx, http.MethodPost, c.path("/thread/turns/"+strconv.Itoa(id)+"/complete"), done, nil, true)
 }
+
+func askPath(turn int) string {
+	return "/thread/turns/" + strconv.Itoa(turn) + "/asks"
+}
+
+// PostAsk is POST thread/turns/{id}/asks: it files the questions of one ask call. It is not
+// retried: a repeated call would file the questions twice.
+func (c *Client) PostAsk(ctx context.Context, turn int, req agentapi.AskRequest) (agentapi.AskState, error) {
+	var st agentapi.AskState
+	err := c.doJSON(ctx, http.MethodPost, c.path(askPath(turn)), req, &st, false)
+	return st, err
+}
+
+// WaitAsk is GET thread/turns/{id}/asks/{ask}: it long-polls up to wait (rounded up to whole
+// seconds, 1 to 50) and returns the answered state, or done=false when nothing changed.
+func (c *Client) WaitAsk(ctx context.Context, turn, ask int, wait time.Duration) (st agentapi.AskState, done bool, err error) {
+	seconds := min(max(int((wait+time.Second-1)/time.Second), 1), 50)
+	path := c.path(askPath(turn) + "/" + strconv.Itoa(ask) + "?wait=" + strconv.Itoa(seconds))
+	resp, err := c.do(ctx, http.MethodGet, path, "", nil, true)
+	if err != nil {
+		return st, false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNoContent {
+		return st, false, nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		return st, false, fmt.Errorf("GET %s: decode response: %w", path, err)
+	}
+	return st, true, nil
+}
+
+// ExpireAsk is POST thread/turns/{id}/asks/{ask}/expire: the open questions of the ask get
+// answer as their answer. It returns the final state; repeating it is harmless.
+func (c *Client) ExpireAsk(ctx context.Context, turn, ask int, answer string) (agentapi.AskState, error) {
+	var st agentapi.AskState
+	path := c.path(askPath(turn) + "/" + strconv.Itoa(ask) + "/expire")
+	err := c.doJSON(ctx, http.MethodPost, path, agentapi.AskExpire{Answer: answer}, &st, true)
+	return st, err
+}

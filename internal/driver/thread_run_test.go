@@ -141,11 +141,12 @@ func verifyResultBundle(t *testing.T, env *threadEnv, bundle []byte, head string
 func checkOneOmpServedBothTurns(t *testing.T, env *threadEnv, log string) {
 	t.Helper()
 	stdin := readFile(t, log)
-	if strings.Count(stdin, `"type":"open_session"`) != 1 || strings.Count(stdin, `"type":"prompt"`) != 2 {
+	if strings.Count(stdin, `"type":"open_session"`) != 1 || strings.Count(stdin, `"type":"prompt"`) != 2 ||
+		strings.Count(stdin, `"type":"set_ask_dialog","enabled":true`) != 1 {
 		t.Fatalf("omp commands:\n%s", stdin)
 	}
 	args := strings.Split(strings.TrimSpace(readFile(t, log+".args")), "\n")
-	want := []string{"--mode", "rpc", "--no-ui", "--approval-mode", "yolo", "--max-time", "120s",
+	want := []string{"--mode", "rpc-ui", "--no-ui", "--approval-mode", "yolo", "--max-time", "120s",
 		"--session-dir", env.paths.SessionDir, "--append-system-prompt", env.paths.SystemPrompt}
 	if !slices.Equal(args, want) {
 		t.Fatalf("omp args = %v, want %v", args, want)
@@ -411,11 +412,11 @@ func TestThreadOmpArgs(t *testing.T) {
 		prompt string
 		want   []string
 	}{
-		{"every built-in tool", nil, "p", []string{"--mode", "rpc", "--no-ui", "--approval-mode", "yolo",
+		{"every built-in tool", nil, "p", []string{"--mode", "rpc-ui", "--no-ui", "--approval-mode", "yolo",
 			"--max-time", "600s", "--session-dir", paths.SessionDir, "--append-system-prompt", paths.SystemPrompt}},
-		{"listed tools", []string{"read", "bash"}, "", []string{"--mode", "rpc", "--no-ui", "--approval-mode", "yolo",
+		{"listed tools", []string{"read", "bash"}, "", []string{"--mode", "rpc-ui", "--no-ui", "--approval-mode", "yolo",
 			"--tools", "read,bash", "--max-time", "600s", "--session-dir", paths.SessionDir}},
-		{"no tools", []string{}, "", []string{"--mode", "rpc", "--no-ui", "--approval-mode", "yolo",
+		{"no tools", []string{}, "", []string{"--mode", "rpc-ui", "--no-ui", "--approval-mode", "yolo",
 			"--no-tools", "--max-time", "600s", "--session-dir", paths.SessionDir}},
 	}
 	for _, tt := range tests {

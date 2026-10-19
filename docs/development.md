@@ -108,12 +108,19 @@ images/runtime/      runtime image          images/e2e/  e2e image
   `finish` for it, which is how cloud thread turns are scripted: `files` (relative path to content, written into
   the working directory), `checkFiles` and `checkEnv` (fakeomp writes `fakeomp-check.txt` there: `cwd: <dir>`,
   then `<path>: present|absent` and `<NAME>: set|unset` lines; paths may be absolute), `reply` (default
-  `fake reply`) and `mode` (`hang` or `exit-early`, as above). Whatever the turn, `get_last_assistant_text`
+  `fake reply`), `ask` (below) and `mode` (`hang` or `exit-early`, as above). Whatever the turn, `get_last_assistant_text`
   answers with the reply, followed by the `FAKEOMP_ECHO_ENV` value when that is set, and the same text is sent as
   an assistant `message_end` event. fakeomp skips the `finish` call when the client registered host tools and
   `finish` is not one of them, as in cloud threads. When the session directory holds a real omp session (a `*.jsonl`
   whose first lines carry a `{"type":"session"}` header, such as a restored handoff conversation), `open_session`
   continues it, appending to that file and reporting its id and path, as omp does; otherwise it uses `fake.jsonl`.
+  `ask: {"questions": [{"id", "question", "options": [{"label"}], "multi"}]}` makes the turn call omp's `ask` tool once,
+  after its files: fakeomp sends the one `extension_ui_request` of method `ask` that real omp sends in `rpc-ui` mode
+  (all questions in it, only after `set_ask_dialog` enabled it; otherwise the turn fails) and waits for the response
+  (an abort ends the wait). The answers are appended to the reply as ` answers: <id>=<selected|custom>; ...`
+  (selected labels joined by `,`, free text after `+`; `answers: cancelled` for a cancelled dialog). Like real omp,
+  a single-choice question answered with both an option and free text is an error: `answers: error: <id> is
+  single-select but carries more than one answer`.
 - **`test/gitserver`** is a smart-HTTP git server for the e2e suite: `git-http-backend` behind Basic auth
   (`x-access-token:$GITSERVER_TOKEN`) over the bare repositories listed in `GITSERVER_REPOS`, rooted at
   `GITSERVER_ROOT` (default `/repos`), on `:8080`. It runs from the e2e image as `omp-e2e-gitserver`.
@@ -149,15 +156,33 @@ A sitting of an `OmpThread` (a session with `spec.threadRef`) uses the same thre
   one, else the uploaded handoff bundle, else the base. The thread branch `omp-cloud/<thread>` is checked out
   there, `origin` is set without credentials, shipped secret files are copied (mode 0600) and kept out of commits
   with `.git/info/exclude`, the shipped omp setup is extracted into `$HOME/.omp/agent`, and the mise toolchain
-  comes from the agent's cache (`toolchains/<hash>`) or is installed and cached. A failed install is an event.
+  comes from the agent's cache (`toolchains/<hash>`) or is installed and cached; a partly failed install is cached too
+  (event `toolchain install partly failed: ...; cached what installed`), so what did install is not thrown away.
+  After every cache restore and reshim `mise install --yes` runs once more (15 minute limit): tools the cache lacks
+  are retried, and when it installed something new (the data directory's `installs` before and after differ) the
+  cache is uploaded again. A failing install is an event, never an error.
 - **`run`** merges the pod's overrides into the user's own `config.yml` (model roles of providers the gateway does
   not serve are mapped to the thread's model; computer use, collab rooms and plugin auto-updates are off) and
-  starts one omp with no tool flag when the agent allows every built-in tool. It then serves the thread's turns
+  starts one omp in `--mode rpc-ui --no-ui` with no tool flag when the agent allows every built-in tool. It then
+  calls `set_ask_dialog {enabled: true}` so that omp's `ask` tool arrives as one `extension_ui_request` of method
+  `ask` per call (other sessions keep `--mode rpc`). It serves the thread's turns
   one after another: after each turn it commits what changed, keeps the branch on the newest commit, stores the
   result bundle on the operator and, with a push sidecar, asks it to push. It ends the sitting after
   `cloud.idleTimeout` without a turn, or when no further turn would fit in `cloud.maxSitting`. A turn that ends
   for auth or retryable reasons (or a pod that is terminating) stays running on the operator and is delivered to the
   next sitting; the work is committed, bundled and its conversation stored first.
+- **Questions.** Each `ask` request of a turn is filed on the operator (`POST thread/turns/{id}/asks`; event kind
+  `question`, text `asked: <first question>`), then long-polled (`GET .../asks/{ask}`) until every question is
+  answered; the answer goes back to omp as an `AnswersUiResponse` with one answer per question (event kind `answer`,
+  `answered by <who>`). omp rejects a single-choice answer that carries both an option and free text, so the driver
+  folds those into one custom answer (`<option>: <text>`). After `cloud.questionTimeout` without a complete answer the
+  driver expires the open questions (`POST .../expire`) with the note `No answer within <timeout>. Continue with your
+  best judgment, say in your reply what you assumed, and ask again at the end of your turn if it still matters.`
+  as the answer text; it never sends `CancelUiResponse{timedOut}`, which makes omp pick the recommended option.
+  Time spent waiting does not count against the turn timeout: the driver enforces that timeout itself and stops its
+  clock while an ask is pending (`--max-time`, the sitting's lifetime, still applies). A stop during the wait aborts
+  the turn through the control poller (the operator has already expired the questions). Every other dialog
+  (`select`, `confirm`, `input`, `editor`) is cancelled at once.
 - **`gitpush`** is the sidecar of pods whose git host has `push`. It listens on `127.0.0.1:8090` and serves only
   `POST /push {"head": "<commit>"}`. The remote URL, branch and credentials come from its own environment
   (`OMP_GITPUSH_URL`, `OMP_GITPUSH_BRANCH`, `OMP_GITPUSH_WORKSPACE`, `OMP_GITPUSH_AUTH`, `OMP_GITPUSH_AUTHDIR`,

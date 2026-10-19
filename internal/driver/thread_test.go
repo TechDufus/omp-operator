@@ -147,6 +147,8 @@ type threadAPI struct {
 	continuity   []byte
 	transcript   []byte
 	toolchainPut map[string][]byte
+	asks         []*apiAsk // every ask filed, in order
+	human        *askHuman // who answers the asks; nil: nobody does
 }
 
 type apiTurn struct {
@@ -233,6 +235,10 @@ func (a *threadAPI) handle(w http.ResponseWriter, r *http.Request) {
 		a.next(w, r)
 		return
 	}
+	if strings.Contains(rest, "/asks") {
+		a.asksRoute(w, r, rest)
+		return
+	}
 	body, _ := io.ReadAll(r.Body)
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -257,11 +263,7 @@ func (a *threadAPI) handle(w http.ResponseWriter, r *http.Request) {
 		a.results = append(a.results, body)
 		a.files["result"] = body
 	case route == "GET /thread/control":
-		stop := false
-		for _, turn := range a.turns {
-			stop = stop || (turn.state == "running" && turn.StopAfter > 0 && time.Since(turn.started) >= turn.StopAfter)
-		}
-		a.json(w, map[string]bool{"stop": stop})
+		a.json(w, map[string]bool{"stop": a.stopRequestedLocked()})
 	case r.Method == http.MethodPost && strings.HasPrefix(rest, "/thread/turns/"):
 		a.completeTurn(w, rest, body)
 	case r.Method == http.MethodGet && (rest == "/continuity" || strings.HasPrefix(rest, "/toolchains/")):
@@ -607,39 +609,43 @@ func TestPrepareThreadSecretFileCannotEscapeThroughSymlink(t *testing.T) {
 	}
 }
 
-func TestPrepareThreadToolchainCache(t *testing.T) {
-	const miseToml = "[tools]\ngo = \"1.27\"\n"
-	disable := []string{"node"}
-	// setup is a thread whose handoff carries a mise.toml, with the given fake mise. It also
-	// returns the toolchain hash prepare has to compute for that workspace.
-	setup := func(t *testing.T, mise string) (*threadAPI, *Driver, Paths, string) {
-		t.Helper()
-		f := newThreadFixture(t)
-		writeFile(t, filepath.Join(f.local, miseTOML), miseToml)
-		runGit(t, f.local, "add", "-A")
-		runGit(t, f.local, "commit", "-q", "-m", "mise")
-		handoff := runGit(t, f.local, "rev-parse", "HEAD")
-		runGit(t, f.local, "update-ref", refHandoff, handoff)
-		runGit(t, f.local, "bundle", "create", f.deltaPath, refHandoff, "^"+f.base)
+const toolchainMiseToml = "[tools]\ngo = \"1.27\"\n"
 
-		api := newThreadAPI(t)
-		plan := f.plan()
-		plan.HandoffCommit = handoff
-		plan.Toolchain = &agentapi.ToolchainPlan{Disable: disable}
-		api.plan = agentapi.Plan{Thread: plan}
-		api.files["source"] = readBytes(t, f.deltaPath)
-		paths := testPaths(t)
-		d := api.driver(paths)
-		d.MiseBin = writeScript(t, mise)
+var toolchainDisable = []string{"node"}
 
-		dir := t.TempDir()
-		writeFile(t, filepath.Join(dir, miseTOML), miseToml)
-		hash, err := ToolchainHash(dir, disable)
-		if err != nil || hash == "" {
-			t.Fatalf("expected hash = %q, %v", hash, err)
-		}
-		return api, d, paths, hash
+// toolchainThread is a thread whose handoff carries a mise.toml, with the given fake mise. It
+// also returns the toolchain hash prepare has to compute for that workspace.
+func toolchainThread(t *testing.T, mise string) (*threadAPI, *Driver, Paths, string) {
+	t.Helper()
+	f := newThreadFixture(t)
+	writeFile(t, filepath.Join(f.local, miseTOML), toolchainMiseToml)
+	runGit(t, f.local, "add", "-A")
+	runGit(t, f.local, "commit", "-q", "-m", "mise")
+	handoff := runGit(t, f.local, "rev-parse", "HEAD")
+	runGit(t, f.local, "update-ref", refHandoff, handoff)
+	runGit(t, f.local, "bundle", "create", f.deltaPath, refHandoff, "^"+f.base)
+
+	api := newThreadAPI(t)
+	plan := f.plan()
+	plan.HandoffCommit = handoff
+	plan.Toolchain = &agentapi.ToolchainPlan{Disable: toolchainDisable}
+	api.plan = agentapi.Plan{Thread: plan}
+	api.files["source"] = readBytes(t, f.deltaPath)
+	paths := testPaths(t)
+	d := api.driver(paths)
+	d.MiseBin = writeScript(t, mise)
+
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, miseTOML), toolchainMiseToml)
+	hash, err := ToolchainHash(dir, toolchainDisable)
+	if err != nil || hash == "" {
+		t.Fatalf("expected hash = %q, %v", hash, err)
 	}
+	return api, d, paths, hash
+}
+
+func TestPrepareThreadToolchainCache(t *testing.T) {
+	setup := toolchainThread
 
 	t.Run("miss installs and caches", func(t *testing.T) {
 		api, d, _, hash := setup(t, shebang+"mkdir -p \"$MISE_DATA_DIR/installs\" && echo tool > \"$MISE_DATA_DIR/installs/go\"\n")
@@ -659,9 +665,38 @@ func TestPrepareThreadToolchainCache(t *testing.T) {
 			t.Fatalf("prepared = %+v, want toolchain hash %s", api.prepared, hash)
 		}
 	})
+}
 
-	t.Run("hit extracts without installing", func(t *testing.T) {
-		api, d, paths, hash := setup(t, shebang+"exit 42\n") // mise must not run
+// logMise is a mise that logs its subcommands to the returned file and runs installBody for `install`.
+func logMise(t *testing.T, installBody string) (script, log string) {
+	t.Helper()
+	log = filepath.Join(t.TempDir(), "mise.log")
+	return shebang + "echo \"$1\" >> " + log + "\ncase \"$1\" in install)\n" + installBody + "\n;; esac\nexit 0\n", log
+}
+
+func toolchainEvents(api *threadAPI) []string {
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	var out []string
+	for _, e := range api.events {
+		if e.Kind == eventToolchain {
+			out = append(out, e.Text)
+		}
+	}
+	return out
+}
+
+const (
+	installNode         = "mkdir -p \"$MISE_DATA_DIR/installs\" && echo node > \"$MISE_DATA_DIR/installs/node\""
+	installNodeThenFail = installNode + " && echo broken >&2 && exit 3"
+)
+
+func TestPrepareThreadToolchainTopUp(t *testing.T) {
+	setup := toolchainThread
+
+	t.Run("hit restores, reshims and tops up with mise install", func(t *testing.T) {
+		script, log := logMise(t, "")
+		api, d, paths, hash := setup(t, script)
 		api.tarballs["/toolchains/"+hash] = buildTarGz(t, tarEntry{Name: "data/installs/go", Body: "cached\n"})
 		if err := d.Prepare(context.Background()); err != nil {
 			t.Fatalf("Prepare: %v", err)
@@ -669,10 +704,104 @@ func TestPrepareThreadToolchainCache(t *testing.T) {
 		if got := string(readBytes(t, filepath.Join(paths.MiseDir, "data", "installs", "go"))); got != "cached\n" {
 			t.Fatalf("restored toolchain = %q", got)
 		}
+		if got := readFile(t, log); got != "reshim\ninstall\n" {
+			t.Fatalf("mise ran %q, want reshim then install after the restore", got)
+		}
 		api.mu.Lock()
 		defer api.mu.Unlock()
 		if len(api.toolchainPut) != 0 {
-			t.Fatal("a cache hit must not upload")
+			t.Fatal("a hit that installed nothing new must not upload")
+		}
+	})
+	t.Run("hit with nothing to install raises no event", func(t *testing.T) {
+		script, _ := logMise(t, "")
+		api, d, _, hash := setup(t, script)
+		api.tarballs["/toolchains/"+hash] = buildTarGz(t, tarEntry{Name: "data/installs/go", Body: "cached\n"})
+		if err := d.Prepare(context.Background()); err != nil {
+			t.Fatalf("Prepare: %v", err)
+		}
+		if events := toolchainEvents(api); len(events) != 0 {
+			t.Fatalf("toolchain events = %v", events)
+		}
+	})
+
+	t.Run("hit heals the cache with what installs now", func(t *testing.T) {
+		script, _ := logMise(t, installNode)
+		api, d, _, hash := setup(t, script)
+		api.tarballs["/toolchains/"+hash] = buildTarGz(t, tarEntry{Name: "data/installs/go", Body: "cached\n"})
+		if err := d.Prepare(context.Background()); err != nil {
+			t.Fatalf("Prepare: %v", err)
+		}
+		if events := toolchainEvents(api); len(events) != 0 {
+			t.Fatalf("toolchain events = %v", events)
+		}
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		put, ok := api.toolchainPut[hash]
+		if !ok {
+			t.Fatalf("a tool that installed after the restore must be cached; puts: %v", api.toolchainPut)
+		}
+		members := tarMembers(t, put)
+		if members["data/installs/node"] != "node\n" || members["data/installs/go"] != "cached\n" {
+			t.Fatalf("cached toolchain members = %v", members)
+		}
+	})
+
+}
+
+func TestPrepareThreadToolchainFailingInstall(t *testing.T) {
+	setup := toolchainThread
+
+	t.Run("hit whose top-up fails is one event", func(t *testing.T) {
+		script, _ := logMise(t, "echo broken >&2\nexit 3")
+		api, d, _, hash := setup(t, script)
+		api.tarballs["/toolchains/"+hash] = buildTarGz(t, tarEntry{Name: "data/installs/go", Body: "cached\n"})
+		if err := d.Prepare(context.Background()); err != nil {
+			t.Fatalf("Prepare must survive a failed top-up: %v", err)
+		}
+		events := toolchainEvents(api)
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		if len(events) != 1 || !strings.HasPrefix(events[0], "toolchain install failed: ") || len(api.toolchainPut) != 0 || len(api.prepared) != 1 {
+			t.Fatalf("events = %v, puts = %v, prepared = %+v", events, api.toolchainPut, api.prepared)
+		}
+	})
+
+	t.Run("hit whose top-up partly fails caches what installed", func(t *testing.T) {
+		script, _ := logMise(t, installNodeThenFail)
+		api, d, _, hash := setup(t, script)
+		api.tarballs["/toolchains/"+hash] = buildTarGz(t, tarEntry{Name: "data/installs/go", Body: "cached\n"})
+		if err := d.Prepare(context.Background()); err != nil {
+			t.Fatalf("Prepare: %v", err)
+		}
+		events := toolchainEvents(api)
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		if len(events) != 1 || !strings.HasPrefix(events[0], "toolchain install partly failed: ") || !strings.HasSuffix(events[0], "; cached what installed") {
+			t.Fatalf("events = %v", events)
+		}
+		if members := tarMembers(t, api.toolchainPut[hash]); members["data/installs/node"] != "node\n" || members["data/installs/go"] != "cached\n" {
+			t.Fatalf("cached toolchain members = %v", members)
+		}
+	})
+
+	t.Run("miss that partly fails caches what installed", func(t *testing.T) {
+		script, _ := logMise(t, installNodeThenFail)
+		api, d, _, hash := setup(t, script)
+		if err := d.Prepare(context.Background()); err != nil {
+			t.Fatalf("Prepare: %v", err)
+		}
+		events := toolchainEvents(api)
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		if len(events) != 1 || !strings.HasPrefix(events[0], "toolchain install partly failed: ") || !strings.HasSuffix(events[0], "; cached what installed") {
+			t.Fatalf("events = %v", events)
+		}
+		if members := tarMembers(t, api.toolchainPut[hash]); members["data/installs/node"] != "node\n" {
+			t.Fatalf("cached toolchain members = %v", members)
+		}
+		if len(api.prepared) != 1 || api.prepared[0].ToolchainHash != hash {
+			t.Fatalf("prepared = %+v", api.prepared)
 		}
 	})
 

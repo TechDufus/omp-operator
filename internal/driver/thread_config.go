@@ -144,9 +144,11 @@ func setNested(settings map[string]any, group, key string, value any) {
 }
 
 // threadOmpArgs is the command line of a thread sitting: no tool flag at all when the agent
-// allows every built-in tool, and omp stops itself when the sitting's lifetime ends.
+// allows every built-in tool, and omp stops itself when the sitting's lifetime ends. The sitting
+// runs in rpc-ui mode (still headless for extensions) because that is the mode in which omp
+// sends an ask tool call to the host as an extension_ui_request.
 func threadOmpArgs(cfg agentapi.SessionConfig, p Paths) []string {
-	args := []string{"--mode", "rpc", "--no-ui", "--approval-mode", approvalYolo}
+	args := []string{"--mode", "rpc-ui", "--no-ui", "--approval-mode", approvalYolo}
 	switch {
 	case cfg.Tools == nil:
 	case len(cfg.Tools) > 0:

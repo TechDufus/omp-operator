@@ -44,7 +44,8 @@ limitations under the License.
 // after the prefix, and replaces the FAKEOMP_SCRIPT calls and finish for it:
 //
 //	{"mode": "normal|hang|exit-early", "files": {"<relative path>": "<content>"},
-//	 "checkFiles": ["<path>"], "checkEnv": ["<NAME>"], "reply": "<text>"}
+//	 "checkFiles": ["<path>"], "checkEnv": ["<NAME>"], "reply": "<text>",
+//	 "ask": {"questions": [{"id": "<key>", "question": "<text>", "options": [{"label": "<text>"}], "multi": false}]}}
 //
 // The turn writes "files" into the working directory, then writes fakeomp-check.txt there:
 // "cwd: <dir>", one "<path>: present|absent" line per checkFiles entry (relative paths are
@@ -53,6 +54,15 @@ limitations under the License.
 // answer "reply" (default "fake reply"), followed by a space and the value of the
 // FAKEOMP_ECHO_ENV variable when that is set; the same text is sent as an assistant
 // message_end event.
+//
+// "ask" makes the turn call omp's ask tool once, after the files: fakeomp sends the one
+// extension_ui_request of method "ask" that real omp sends in rpc-ui mode (all questions in
+// it) and waits for the extension_ui_response (an abort ends the wait). It does so only after
+// the host enabled it with set_ask_dialog; otherwise the turn fails, as nothing would ask. The
+// answers go into the reply as " answers: <id>=<selected|custom>; ..." (selected labels joined
+// by "," and free text appended after "+"; "answers: cancelled" for a cancelled dialog). Like
+// real omp, a single-select question answered with both an option and free text is an error,
+// which the reply reports as "answers: error: <id> is single-select but carries more than one answer".
 //
 // # Modes
 //
@@ -121,6 +131,35 @@ type turnScript struct {
 	CheckFiles []string          `json:"checkFiles"`
 	CheckEnv   []string          `json:"checkEnv"`
 	Reply      string            `json:"reply"`
+	Ask        *askScript        `json:"ask"`
+}
+
+// askScript is the ask tool call of a turn, in the shape of omp's ask tool arguments.
+type askScript struct {
+	Questions []askQuestion `json:"questions"`
+}
+
+type askQuestion struct {
+	ID       string      `json:"id"`
+	Question string      `json:"question"`
+	Options  []askOption `json:"options"`
+	Multi    bool        `json:"multi"`
+}
+
+type askOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+// uiResponse is the part of an extension_ui_response frame fakeomp reads.
+type uiResponse struct {
+	ID        string `json:"id"`
+	Cancelled bool   `json:"cancelled"`
+	Answers   []struct {
+		ID              string   `json:"id"`
+		SelectedOptions []string `json:"selectedOptions"`
+		CustomInput     *string  `json:"customInput"`
+	} `json:"answers"`
 }
 
 func validMode(mode string) bool {
@@ -211,6 +250,9 @@ type server struct {
 	sessionPath string
 	waiting     map[string]chan omprpc.HostToolResult
 	activeAbort map[int64]context.CancelFunc
+	// askDialog is set by set_ask_dialog; uiWaiting holds the extension UI requests awaiting a response.
+	askDialog bool
+	uiWaiting map[string]chan uiResponse
 
 	seq atomic.Int64
 }
@@ -226,6 +268,7 @@ func main() {
 		opts:        parseArgs(os.Args[1:]),
 		out:         os.Stdout,
 		waiting:     map[string]chan omprpc.HostToolResult{},
+		uiWaiting:   map[string]chan uiResponse{},
 		activeAbort: map[int64]context.CancelFunc{},
 	}
 	srv.sessionDir = srv.opts.sessionDir
@@ -382,6 +425,29 @@ func (s *server) handle(ctx context.Context, line []byte) {
 		}
 	case "host_tool_update":
 		// Partial results are not recorded.
+	case "set_ask_dialog":
+		var params omprpc.SetAskDialogCommand
+		if err := json.Unmarshal(line, &params); err != nil {
+			s.fail(frame.ID, frame.Type, "invalid_params", err.Error())
+			return
+		}
+		s.mu.Lock()
+		s.askDialog = params.Enabled
+		s.mu.Unlock()
+		s.respond(frame.ID, frame.Type, omprpc.SetAskDialogResult(params))
+	case "extension_ui_response":
+		var resp uiResponse
+		if err := json.Unmarshal(line, &resp); err != nil {
+			fmt.Fprintln(os.Stderr, "fakeomp: bad extension_ui_response:", err)
+			return
+		}
+		s.mu.Lock()
+		ch := s.uiWaiting[resp.ID]
+		delete(s.uiWaiting, resp.ID)
+		s.mu.Unlock()
+		if ch != nil {
+			ch <- resp
+		}
 	default:
 		s.fail(frame.ID, frame.Type, "unknown_command", "fakeomp does not implement "+frame.Type)
 	}
@@ -626,6 +692,16 @@ func (s *server) turn(ctx context.Context, ts *turnScript, mode string) (omprpc.
 		if err := runTurnScript(ts); err != nil {
 			return omprpc.PromptStatusError, &omprpc.PromptError{Message: "fakeomp: " + err.Error()}
 		}
+		if ts.Ask != nil {
+			text, aborted, err := s.ask(ctx, ts.Ask)
+			switch {
+			case aborted:
+				return omprpc.PromptStatusAborted, nil
+			case err != nil:
+				return omprpc.PromptStatusError, &omprpc.PromptError{Message: "fakeomp: " + err.Error()}
+			}
+			reply += " " + text
+		}
 	} else if !s.runLegacy(ctx, mode) {
 		return omprpc.PromptStatusAborted, nil
 	}
@@ -721,6 +797,87 @@ func runTurnScript(ts *turnScript) error {
 		b.WriteString(name + ": " + state + "\n")
 	}
 	return os.WriteFile(filepath.Join(cwd, checkFile), []byte(b.String()), 0o644)
+}
+
+// ask sends the script's ask tool call to the host the way omp does in rpc-ui mode after
+// set_ask_dialog enabled it (one extension_ui_request of method "ask" with every question),
+// waits for the answer and returns it as "answers: <id>=<selected|custom>; ...". The text
+// also reports what real omp would reject: a single-select question answered with both an
+// option and free text. aborted is true when the run was aborted while waiting.
+func (s *server) ask(ctx context.Context, a *askScript) (text string, aborted bool, err error) {
+	s.mu.Lock()
+	enabled := s.askDialog
+	s.mu.Unlock()
+	if !enabled {
+		return "", false, errors.New("ask: set_ask_dialog was not enabled, so omp would not send an ask request")
+	}
+	questions := make([]omprpc.AskQuestion, 0, len(a.Questions))
+	for _, q := range a.Questions {
+		options := make([]omprpc.AskOption, 0, len(q.Options))
+		for _, o := range q.Options {
+			opt := omprpc.AskOption{Label: o.Label}
+			if o.Description != "" {
+				opt.Description = new(o.Description)
+			}
+			options = append(options, opt)
+		}
+		questions = append(questions, omprpc.AskQuestion{ID: q.ID, Question: q.Question, Options: options, Multi: q.Multi})
+	}
+	n := s.seq.Add(1)
+	id, toolCallID := fmt.Sprintf("ui_%d", n), fmt.Sprintf("call_%d", n)
+	ch := make(chan uiResponse, 1)
+	s.mu.Lock()
+	s.uiWaiting[id] = ch
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.uiWaiting, id)
+		s.mu.Unlock()
+	}()
+
+	args, _ := json.Marshal(a)
+	s.emit(omprpc.ToolExecutionStartEvent{ToolCallID: toolCallID, ToolName: "ask", Args: args})
+	s.emit(omprpc.AskUiRequest{ID: id, Questions: questions})
+	var resp uiResponse
+	select {
+	case resp = <-ch:
+	case <-ctx.Done():
+		return "", true, nil
+	}
+	text = describeAnswers(a, resp)
+	result, _ := json.Marshal(omprpc.TextResult(text))
+	s.emit(omprpc.ToolExecutionEndEvent{ToolCallID: toolCallID, ToolName: "ask", Result: result})
+	return text, false, nil
+}
+
+// describeAnswers renders an ask response as the reply text.
+func describeAnswers(a *askScript, resp uiResponse) string {
+	if resp.Cancelled {
+		return "answers: cancelled"
+	}
+	multi := map[string]bool{}
+	for _, q := range a.Questions {
+		multi[q.ID] = q.Multi
+	}
+	parts := make([]string, 0, len(resp.Answers))
+	for _, ans := range resp.Answers {
+		custom := ""
+		if ans.CustomInput != nil {
+			custom = *ans.CustomInput
+		}
+		if count := len(ans.SelectedOptions); !multi[ans.ID] && (count > 1 || (count == 1 && custom != "")) {
+			return fmt.Sprintf("answers: error: %s is single-select but carries more than one answer", ans.ID)
+		}
+		value := strings.Join(ans.SelectedOptions, ",")
+		if custom != "" {
+			if value != "" {
+				value += "+"
+			}
+			value += custom
+		}
+		parts = append(parts, ans.ID+"="+value)
+	}
+	return "answers: " + strings.Join(parts, "; ")
 }
 
 // callTool issues one host tool call and waits for its result; false means

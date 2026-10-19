@@ -56,6 +56,8 @@ const (
 	DefaultSessionTimeout = 30 * time.Minute
 	// DefaultControlInterval is how often a thread sitting asks the operator whether the running turn was stopped.
 	DefaultControlInterval = 5 * time.Second
+	// DefaultQuestionTimeout applies when the thread config carries no question timeout (cloud.questionTimeout).
+	DefaultQuestionTimeout = 30 * time.Minute
 
 	// extractMax bounds the bytes one extraction may write (zip-bomb guard).
 	extractMax int64 = 8 << 30

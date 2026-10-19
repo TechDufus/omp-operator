@@ -650,3 +650,152 @@ func TestParseArgs(t *testing.T) {
 		})
 	}
 }
+
+// askRequests returns the ask requests the harness received so far.
+func (h *harness) askRequests() []omprpc.AskUiRequest {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []omprpc.AskUiRequest
+	for _, f := range h.frames {
+		if req, ok := f.Value.(omprpc.ExtensionUiRequest); ok {
+			if ask, ok := req.Value.(omprpc.AskUiRequest); ok {
+				out = append(out, ask)
+			}
+		}
+	}
+	return out
+}
+
+func (h *harness) waitAsk(t *testing.T) omprpc.AskUiRequest {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if asks := h.askRequests(); len(asks) > 0 {
+			return asks[len(asks)-1]
+		}
+	}
+	t.Fatal("no ask request arrived")
+	return omprpc.AskUiRequest{}
+}
+
+const askScriptJSON = `FAKEOMP:{"files":{"a.txt":"1"},"reply":"asked","ask":{"questions":[` +
+	`{"id":"color","question":"Which color?","options":[{"label":"red"},{"label":"blue","description":"cool"}]},` +
+	`{"id":"tags","question":"Which tags?","options":[{"label":"a"},{"label":"b"}],"multi":true}]}}`
+
+// askTurn plays prompt in the background, waits for its ask request and answers it with reply.
+func askTurn(t *testing.T, h *harness, prompt string,
+	reply func(omprpc.AskUiRequest) omprpc.RpcInboundVariant) (omprpc.AskUiRequest, string) {
+	t.Helper()
+	type outcome struct {
+		turn omprpc.PromptTurn
+		err  error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		turn, err := promptText(t, h, prompt)
+		done <- outcome{turn, err}
+	}()
+	ask := h.waitAsk(t)
+	if err := h.client.Send(reply(ask)); err != nil {
+		t.Fatal(err)
+	}
+	res := <-done
+	if res.err != nil || res.turn.Result == nil || res.turn.Result.Status != omprpc.PromptStatusCompleted {
+		t.Fatalf("turn = %+v, %v", res.turn.Result, res.err)
+	}
+	text, err := h.client.GetLastAssistantText(context.Background())
+	if err != nil || text == nil {
+		t.Fatalf("last assistant text = %v, %v", text, err)
+	}
+	return ask, *text
+}
+
+func answers(ask omprpc.AskUiRequest, a ...omprpc.AskAnswer) omprpc.RpcInboundVariant {
+	return omprpc.AnswersUiResponse{ID: ask.ID, Answers: a}
+}
+
+func TestAskTurnSendsOneRequestAndReportsAnswers(t *testing.T) {
+	tests := []struct {
+		name  string
+		reply func(omprpc.AskUiRequest) omprpc.RpcInboundVariant
+		want  string
+	}{
+		{"options and free text", func(ask omprpc.AskUiRequest) omprpc.RpcInboundVariant {
+			return answers(ask,
+				omprpc.AskAnswer{ID: "color", SelectedOptions: []string{"blue"}},
+				omprpc.AskAnswer{ID: "tags", SelectedOptions: []string{"a", "b"}, CustomInput: new("extra")})
+		}, "asked answers: color=blue; tags=a,b+extra"},
+		{"free text only", func(ask omprpc.AskUiRequest) omprpc.RpcInboundVariant {
+			return answers(ask,
+				omprpc.AskAnswer{ID: "color", SelectedOptions: []string{}, CustomInput: new("teal")},
+				omprpc.AskAnswer{ID: "tags", SelectedOptions: []string{}})
+		}, "asked answers: color=teal; tags="},
+		{"single select with both is rejected like omp does", func(ask omprpc.AskUiRequest) omprpc.RpcInboundVariant {
+			return answers(ask,
+				omprpc.AskAnswer{ID: "color", SelectedOptions: []string{"red"}, CustomInput: new("but darker")},
+				omprpc.AskAnswer{ID: "tags", SelectedOptions: []string{}})
+		}, "asked answers: error: color is single-select but carries more than one answer"},
+		{"cancelled", func(ask omprpc.AskUiRequest) omprpc.RpcInboundVariant {
+			return omprpc.CancelUiResponse{ID: ask.ID}
+		}, "asked answers: cancelled"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := start(t, "")
+			enable := omprpc.SetAskDialogCommand{Enabled: true}
+			if on, err := h.client.SetAskDialog(context.Background(), enable); err != nil || !on {
+				t.Fatalf("set_ask_dialog = %v, %v", on, err)
+			}
+			ask, text := askTurn(t, h, askScriptJSON, tt.reply)
+			if text != tt.want {
+				t.Fatalf("reply = %q, want %q", text, tt.want)
+			}
+			// One request carries every question, with the options and flags of the script.
+			if len(ask.Questions) != 2 || ask.Questions[0].ID != "color" || ask.Questions[0].Question != "Which color?" ||
+				len(ask.Questions[0].Options) != 2 || ask.Questions[0].Options[1].Label != "blue" ||
+				deref(ask.Questions[0].Options[1].Description) != "cool" || ask.Questions[0].Multi ||
+				ask.Questions[1].ID != "tags" || !ask.Questions[1].Multi {
+				t.Fatalf("ask request = %+v", ask)
+			}
+			// Scripted files are written before the question.
+			if got := string(mustRead(t, filepath.Join(filepath.Dir(h.sessionDir), "a.txt"))); got != "1" {
+				t.Fatalf("a.txt = %q", got)
+			}
+			if asks := h.askRequests(); len(asks) != 1 {
+				t.Fatalf("ask requests = %d, want one per ask call", len(asks))
+			}
+		})
+	}
+}
+
+func TestAskTurnNeedsTheDialogEnabled(t *testing.T) {
+	h := start(t, "")
+	turn, err := promptText(t, h, askScriptJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Result == nil || turn.Result.Status != omprpc.PromptStatusError ||
+		turn.Result.Error == nil || !strings.Contains(turn.Result.Error.Message, "set_ask_dialog") {
+		t.Fatalf("result = %+v", turn.Result)
+	}
+	if asks := h.askRequests(); len(asks) != 0 {
+		t.Fatalf("ask requests without set_ask_dialog: %+v", asks)
+	}
+}
+
+func TestAskTurnAbortEndsTheWait(t *testing.T) {
+	h := start(t, "")
+	if _, err := h.client.SetAskDialog(context.Background(), omprpc.SetAskDialogCommand{Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		h.waitAsk(t)
+		_ = h.client.Abort(context.Background())
+	}()
+	turn, err := promptText(t, h, askScriptJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Result == nil || turn.Result.Status != omprpc.PromptStatusAborted {
+		t.Fatalf("result = %+v", turn.Result)
+	}
+}

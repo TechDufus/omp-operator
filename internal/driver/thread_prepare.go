@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -336,9 +337,11 @@ func (d *Driver) restoreSetup(ctx context.Context) error {
 }
 
 // restoreThreadToolchain makes the workspace's mise tools available from the agent's shared
-// cache, installing and caching them on a miss. It returns the toolchain hash, empty when the
-// agent has no toolchain or the workspace no mise.toml. An install that fails is an event, not
-// an error: the agent can still work without those tools.
+// cache. A miss installs and caches them, partial installs included: what did install is worth
+// keeping even when another tool failed. A hit is topped up: `mise install` runs once more, so
+// tools the cache lacks are retried and the cache heals. It returns the toolchain hash, empty
+// when the agent has no toolchain or the workspace no mise.toml. A failing install is an
+// event, not an error: the agent can still work without those tools.
 func (d *Driver) restoreThreadToolchain(ctx context.Context, tc *agentapi.ToolchainPlan) (string, error) {
 	if tc == nil {
 		return "", nil
@@ -355,19 +358,49 @@ func (d *Driver) restoreThreadToolchain(ctx context.Context, tc *agentapi.Toolch
 		err = d.reshimMise(ctx)
 	}
 	if err != nil {
-		d.postEvent(ctx, eventToolchain, "toolchain restore failed: "+truncate(err.Error(), maxEventError))
+		d.postToolchainEvent(ctx, "toolchain restore failed: "+truncate(err.Error(), maxEventError))
 	}
-	if found && err == nil {
-		return hash, nil
+	// Whatever was restored, install what is still missing; a miss starts from nothing but the shims.
+	restored := found && err == nil
+	before := installedTools(d.Paths.MiseDataDir)
+	installErr := d.miseInstall(ctx, threadMiseTimeout, "MISE_TRUSTED_CONFIG_PATHS="+d.Paths.Workspace)
+	grew := !slices.Equal(before, installedTools(d.Paths.MiseDataDir))
+	// Cache what is new; a miss that installed cleanly is cached too, even when the tools are
+	// nothing the data directory shows, because the cache entry is what makes the next start a hit.
+	cacheable := grew || (!restored && installErr == nil)
+	switch {
+	case installErr != nil && cacheable:
+		d.postToolchainEvent(ctx,
+			"toolchain install partly failed: "+truncate(installErr.Error(), maxEventError)+"; cached what installed")
+	case installErr != nil:
+		d.postToolchainEvent(ctx, "toolchain install failed: "+truncate(installErr.Error(), maxEventError))
 	}
-	if err := d.miseInstall(ctx, threadMiseTimeout, "MISE_TRUSTED_CONFIG_PATHS="+d.Paths.Workspace); err != nil {
-		d.postEvent(ctx, eventToolchain, "toolchain install failed: "+truncate(err.Error(), maxEventError))
-		return hash, nil
-	}
-	if err := d.cacheToolchain(ctx, hash); err != nil {
-		d.postEvent(ctx, eventToolchain, "toolchain not cached: "+truncate(err.Error(), maxEventError))
+	if cacheable {
+		if err := d.cacheToolchain(ctx, hash); err != nil {
+			d.postToolchainEvent(ctx, "toolchain not cached: "+truncate(err.Error(), maxEventError))
+		}
 	}
 	return hash, nil
+}
+
+// installedTools lists the tool versions in the mise data directory, sorted: "<tool>/<version>"
+// for every installs/<tool>/<version> directory and "<tool>" for anything else under installs.
+func installedTools(dataDir string) []string {
+	root := filepath.Join(dataDir, "installs")
+	var out []string
+	tools, _ := os.ReadDir(root)
+	for _, tool := range tools {
+		versions, err := os.ReadDir(filepath.Join(root, tool.Name()))
+		if err != nil || len(versions) == 0 {
+			out = append(out, tool.Name())
+			continue
+		}
+		for _, v := range versions {
+			out = append(out, tool.Name()+"/"+v.Name())
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // cacheToolchain uploads the mise data directory to the agent's toolchain cache under hash.
@@ -389,11 +422,11 @@ func (d *Driver) cacheToolchain(ctx context.Context, hash string) error {
 	return d.API.PutFile(uctx, "/toolchains/"+hash, tmp.Name())
 }
 
-// postEvent posts one progress line outside a run's event sink (prepare has none).
-func (d *Driver) postEvent(ctx context.Context, kind, text string) {
+// postToolchainEvent posts one toolchain progress line outside a run's event sink (prepare has none).
+func (d *Driver) postToolchainEvent(ctx context.Context, text string) {
 	cctx, cancel := child(ctx, controlTimeout)
 	defer cancel()
-	ev := agentapi.Event{At: time.Now().UTC(), Kind: kind, Text: truncate(text, maxEventText)}
+	ev := agentapi.Event{At: time.Now().UTC(), Kind: eventToolchain, Text: truncate(text, maxEventText)}
 	if err := d.API.Events(cctx, []agentapi.Event{ev}); err != nil {
 		d.Log.Warn("post event", "error", err)
 	}

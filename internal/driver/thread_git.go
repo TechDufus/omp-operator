@@ -45,6 +45,8 @@ type threadRun struct {
 	cfg    agentapi.ThreadConfig
 	red    *Redactor
 	events *eventSink
+	// asks answers omp's questions for the running turn.
+	asks *askBridge
 	// uploaded is the branch tip of the result bundle the operator holds.
 	uploaded string
 }

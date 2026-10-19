@@ -97,13 +97,18 @@ func (d *Driver) sit(ctx context.Context, cfg agentapi.SessionConfig, red *Redac
 	if err != nil {
 		return failed(agentapi.OutcomeRetryable, "omp did not become ready: "+err.Error())
 	}
+	bridge := &askBridge{
+		d: d, client: client, events: events, red: red,
+		timeout: secondsOr(cfg.Thread.QuestionTimeoutSeconds, DefaultQuestionTimeout),
+	}
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		events.drain(client.Frames())
+		events.drain(client.Frames(), bridge.handle)
 	}()
+	bridge.enable(ctx)
 
-	done := d.serveTurns(ctx, client, cfg, red, events)
+	done := d.serveTurns(ctx, client, cfg, red, events, bridge)
 
 	if client.Err() == nil {
 		done.Usage = d.usage(context.WithoutCancel(ctx), client)
@@ -121,7 +126,7 @@ func (d *Driver) sit(ctx context.Context, cfg agentapi.SessionConfig, red *Redac
 // model failed in a way a new sitting may survive (the running turn then stays running and is
 // delivered again); error when the sitting could not start.
 func (d *Driver) serveTurns(ctx context.Context, client *omprpc.Client, cfg agentapi.SessionConfig, red *Redactor,
-	events *eventSink) agentapi.Complete {
+	events *eventSink, bridge *askBridge) agentapi.Complete {
 	var done agentapi.Complete
 	th := *cfg.Thread
 	provider, id, err := splitModel(cfg.Model.Default)
@@ -144,7 +149,7 @@ func (d *Driver) serveTurns(ctx context.Context, client *omprpc.Client, cfg agen
 	sitting := secondsOr(th.MaxSittingSeconds, 4*time.Hour)
 	start := time.Now()
 	idleDeadline := start.Add(idle)
-	tr := &threadRun{cfg: th, red: red, events: events, uploaded: d.resultTip(ctx)}
+	tr := &threadRun{cfg: th, red: red, events: events, asks: bridge, uploaded: d.resultTip(ctx)}
 
 	for turns := 0; ; {
 		if ctx.Err() != nil {
@@ -188,6 +193,18 @@ func secondsOr(seconds int64, fallback time.Duration) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+// promptTurn sends one thread turn's message and waits for its result. The turn's own clock, not
+// the wait, decides when it has taken too long: the clock aborts the run and the classification
+// reads its deadline.
+func (d *Driver) promptTurn(ctx context.Context, client *omprpc.Client, message string, wait time.Duration,
+	clock *turnClock) (outcome, msg string) {
+	turn, err := client.PromptAndWait(ctx, omprpc.PromptCommand{Message: message}, wait)
+	if err != nil && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		d.abort(ctx, client)
+	}
+	return classify(turn, err, clock.deadline(), ctx.Err() != nil)
+}
+
 // runTurn plays one turn and reports it to the operator. It returns an empty outcome when the
 // sitting can serve the next turn, else the sitting's outcome and message: the turn is then
 // still running on the operator and will be delivered to the next sitting.
@@ -195,11 +212,20 @@ func (d *Driver) runTurn(ctx context.Context, client *omprpc.Client, tr *threadR
 	timeout time.Duration) (outcome, msg string) {
 	tr.events.add(eventTurn, fmt.Sprintf("turn %d: %s", turn.ID, truncate(turn.Text, maxTurnEcho)))
 	before := d.usage(ctx, client)
-	deadline := time.Now().Add(timeout)
+
+	// The turn's own timer: omp's --max-time bounds the sitting, and the time spent waiting for the
+	// user's answers does not count against the turn. The wait handed to PromptAndWait only has to
+	// outlast every turn that can still run.
+	clock := newTurnClock(timeout, func() { d.abort(ctx, client) })
+	wait := secondsOr(tr.cfg.MaxSittingSeconds, 4*time.Hour) + timeout + d.PromptGrace
+	at := tr.asks.begin(ctx, turn.ID, clock)
 
 	stopWatching := d.watchStop(ctx, client)
-	outcome, msg = d.prompt(ctx, client, turn.Text, timeout+d.PromptGrace, deadline)
+	outcome, msg = d.promptTurn(ctx, client, turn.Text, wait, clock)
 	stopWatching()
+	clock.stop()
+	tr.asks.end(at)
+
 	interrupted := ctx.Err() != nil
 	if interrupted {
 		d.abort(ctx, client)
