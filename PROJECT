@@ -45,4 +45,13 @@ resources:
   kind: OmpAction
   path: github.com/TechDufus/omp-operator/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: techdufus.com
+  group: omp
+  kind: OmpThread
+  path: github.com/TechDufus/omp-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

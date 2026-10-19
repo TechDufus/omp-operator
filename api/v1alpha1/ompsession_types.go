@@ -49,6 +49,10 @@ type OmpSessionSpec struct {
 	// event describes the webhook event that created the session.
 	// +optional
 	Event *SessionEvent `json:"event,omitempty"`
+
+	// threadRef is the OmpThread this session is a sitting of, if any.
+	// +optional
+	ThreadRef *LocalObjectRef `json:"threadRef,omitempty"`
 }
 
 // SessionEvent describes the webhook event behind a session.

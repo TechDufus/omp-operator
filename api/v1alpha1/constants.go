@@ -54,6 +54,8 @@ const (
 	LabelSession = "omp.techdufus.com/session"
 	// LabelRole is the PodRole of an operator-created pod.
 	LabelRole = "omp.techdufus.com/role"
+	// LabelThread is the OmpThread name on cloud sittings.
+	LabelThread = "omp.techdufus.com/thread"
 )
 
 // PodRole is the value of LabelRole.
@@ -73,6 +75,7 @@ const (
 	SessionKindWebhook  SessionKind = "webhook"
 	SessionKindSchedule SessionKind = "schedule"
 	SessionKindManual   SessionKind = "manual"
+	SessionKindCloud    SessionKind = "cloud"
 )
 
 // SessionPhase is the lifecycle phase of an OmpSession.
@@ -252,4 +255,29 @@ const (
 	MethodPut    HTTPMethod = "PUT"
 	MethodPatch  HTTPMethod = "PATCH"
 	MethodDelete HTTPMethod = "DELETE"
+)
+
+// ThreadPhase is the lifecycle phase of an OmpThread.
+// +kubebuilder:validation:Enum=Working;Idle
+type ThreadPhase string
+
+// Thread phases.
+const (
+	// ThreadPhaseWorking means a turn is queued or running.
+	ThreadPhaseWorking ThreadPhase = "Working"
+	// ThreadPhaseIdle means every turn has finished.
+	ThreadPhaseIdle ThreadPhase = "Idle"
+)
+
+// TurnState is the state of one turn (one message) of an OmpThread.
+// +kubebuilder:validation:Enum=queued;running;done;failed;cancelled
+type TurnState string
+
+// Turn states.
+const (
+	TurnStateQueued    TurnState = "queued"
+	TurnStateRunning   TurnState = "running"
+	TurnStateDone      TurnState = "done"
+	TurnStateFailed    TurnState = "failed"
+	TurnStateCancelled TurnState = "cancelled"
 )

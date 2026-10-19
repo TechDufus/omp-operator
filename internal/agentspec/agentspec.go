@@ -23,7 +23,9 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 
@@ -55,12 +57,49 @@ var (
 	envNamePattern    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
+// Limits of a cloud-enabled agent.
+const (
+	// MaxCloudAgentNameLength is the longest agent name allowed with spec.cloud set: thread names append "-<6 chars>" and sitting names "-<n>".
+	MaxCloudAgentNameLength = 50
+	// AllTools, as the only entry of tools.allow, means every omp built-in tool.
+	AllTools = "*"
+
+	minIdleTimeout     = time.Minute
+	maxIdleTimeout     = 24 * time.Hour
+	minMaxSitting      = 10 * time.Minute
+	maxMaxSitting      = 24 * time.Hour
+	minThreadRetention = time.Hour
+)
+
+var cloudHostPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
+
+// CheckEnvName reports why name cannot be an environment variable the operator
+// lets users define (credential env, thread secretEnv); empty means it can.
+// The result completes the sentence "env <name> ...".
+func CheckEnvName(name string) string {
+	if !envNamePattern.MatchString(name) {
+		return "is not a valid variable name"
+	}
+	if reservedEnv[name] {
+		return "is reserved"
+	}
+	for _, p := range reservedEnvPrefix {
+		if strings.HasPrefix(name, p) {
+			return "is reserved: names starting with " + p + " are used by the operator"
+		}
+	}
+	return ""
+}
+
 // Validate checks everything that needs no cluster access: unions, MCP
 // consistency, name uniqueness and the credential rules. It returns the first
 // problem found, or nil.
 func Validate(a *ompv1alpha1.OmpAgent) *Problem {
 	if p := validateStructure(&a.Spec); p != nil {
 		return p
+	}
+	if a.Spec.Cloud != nil && len(a.Name) > MaxCloudAgentNameLength {
+		return invalidSpec("name %q is %d characters; an agent with cloud set may have at most %d", a.Name, len(a.Name), MaxCloudAgentNameLength)
 	}
 	if p := validateUniqueNames(&a.Spec); p != nil {
 		return p
@@ -71,6 +110,14 @@ func Validate(a *ompv1alpha1.OmpAgent) *Problem {
 func validateStructure(spec *ompv1alpha1.OmpAgentSpec) *Problem {
 	if p := validateModel(&spec.Model); p != nil {
 		return p
+	}
+	if p := validateTools(&spec.Tools); p != nil {
+		return p
+	}
+	if spec.Cloud != nil {
+		if p := validateCloud(spec.Cloud); p != nil {
+			return p
+		}
 	}
 	for i := range spec.Skills {
 		if p := validateSkill(i, &spec.Skills[i]); p != nil {
@@ -135,6 +182,41 @@ func validateModel(m *ompv1alpha1.ModelSpec) *Problem {
 		}
 		if r := g.TokenSecretRef; r != nil && (r.Name == "" || r.Key == "") {
 			return invalidSpec("model.gateway.tokenSecretRef needs a name and a key")
+		}
+	}
+	return nil
+}
+
+func validateTools(t *ompv1alpha1.ToolsSpec) *Problem {
+	if len(t.Allow) > 1 && slices.Contains(t.Allow, AllTools) {
+		return invalidSpec("tools.allow: %q means every tool and cannot be combined with other entries", AllTools)
+	}
+	return nil
+}
+
+func validateCloud(c *ompv1alpha1.CloudSpec) *Problem {
+	// A zero duration is unset; the API server defaults it.
+	if d := c.IdleTimeout.Duration; d != 0 && (d < minIdleTimeout || d > maxIdleTimeout) {
+		return invalidSpec("cloud.idleTimeout %s must be between %s and %s", d, minIdleTimeout, maxIdleTimeout)
+	}
+	if d := c.MaxSitting.Duration; d != 0 && (d < minMaxSitting || d > maxMaxSitting) {
+		return invalidSpec("cloud.maxSitting %s must be between %s and %s", d, minMaxSitting, maxMaxSitting)
+	}
+	if d := c.ThreadRetention.Duration; d != 0 && d < minThreadRetention {
+		return invalidSpec("cloud.threadRetention %s must be at least %s", d, minThreadRetention)
+	}
+	seen := map[string]bool{}
+	for i := range c.Git {
+		g := &c.Git[i]
+		if !cloudHostPattern.MatchString(g.Host) {
+			return invalidSpec("cloud.git[%d]: host %q must be a lowercase hostname", i, g.Host)
+		}
+		if seen[g.Host] {
+			return invalidSpec("cloud.git[%d]: host %q is listed more than once", i, g.Host)
+		}
+		seen[g.Host] = true
+		if p := validateGitAuth(fmt.Sprintf("cloud.git[%d]", i), &g.Auth); p != nil {
+			return p
 		}
 	}
 	return nil
@@ -381,16 +463,8 @@ func validateCredentials(creds []ompv1alpha1.Credential) *Problem {
 	files := map[string]string{}
 	for _, c := range creds {
 		if c.Env != "" {
-			if !envNamePattern.MatchString(c.Env) {
-				return invalidCredential(c.Name, "env %q is not a valid variable name", c.Env)
-			}
-			if reservedEnv[c.Env] {
-				return invalidCredential(c.Name, "env %q is reserved", c.Env)
-			}
-			for _, p := range reservedEnvPrefix {
-				if strings.HasPrefix(c.Env, p) {
-					return invalidCredential(c.Name, "env %q is reserved: names starting with %s are used by the operator", c.Env, p)
-				}
+			if msg := CheckEnvName(c.Env); msg != "" {
+				return invalidCredential(c.Name, "env %q %s", c.Env, msg)
 			}
 			if other, dup := envs[c.Env]; dup {
 				return invalidCredential(c.Name, "env %q is already used by credential %q", c.Env, other)
@@ -456,6 +530,11 @@ func SecretRefs(spec *ompv1alpha1.OmpAgentSpec) []SecretUse {
 	}
 	if w := spec.Workspace; w != nil && w.Git != nil {
 		addAuth("workspace.git", w.Git.Auth)
+	}
+	if c := spec.Cloud; c != nil {
+		for i := range c.Git {
+			addAuth(fmt.Sprintf("cloud.git[%d]", i), &c.Git[i].Auth)
+		}
 	}
 	for i := range spec.Notify {
 		for j, r := range SinkRefs(&spec.Notify[i]) {

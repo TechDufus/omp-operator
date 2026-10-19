@@ -101,6 +101,17 @@ spec:
                 description: prompt is the text sent to omp.
                 minLength: 1
                 type: string
+              threadRef:
+                description: threadRef is the OmpThread this session is a sitting
+                  of, if any.
+                properties:
+                  name:
+                    description: name is the object name.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
               triggerRef:
                 description: triggerRef is the OmpTrigger that created the session,
                   if any.

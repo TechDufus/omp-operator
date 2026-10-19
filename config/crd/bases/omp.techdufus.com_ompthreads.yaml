@@ -1,0 +1,349 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: ompthreads.omp.techdufus.com
+spec:
+  group: omp.techdufus.com
+  names:
+    kind: OmpThread
+    listKind: OmpThreadList
+    plural: ompthreads
+    shortNames:
+    - ompthread
+    singular: ompthread
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.agentRef.name
+      name: Agent
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.turns
+      name: Turns
+      type: integer
+    - jsonPath: .status.latest.state
+      name: Latest
+      type: string
+    - jsonPath: .spec.title
+      name: Title
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: OmpThread is the Schema for the ompthreads API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of OmpThread
+            properties:
+              agentRef:
+                description: agentRef is the cloud-enabled OmpAgent that runs the
+                  thread.
+                properties:
+                  name:
+                    description: name is the object name.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              author:
+                description: author is the git identity commits are made with.
+                properties:
+                  email:
+                    description: email is the author and committer email.
+                    type: string
+                  name:
+                    description: name is the author and committer name.
+                    type: string
+                type: object
+              model:
+                description: model is provider/id used for every turn; empty means
+                  the agent's model.default.
+                type: string
+              owner:
+                description: owner is the API principal that created the thread, for
+                  example token:dev.
+                maxLength: 253
+                type: string
+              paths:
+                description: paths are the absolute home and workspace paths of the
+                  user's machine, mirrored in the pod.
+                properties:
+                  home:
+                    description: home is the user's $HOME; empty means /home/agent.
+                    type: string
+                  workspace:
+                    description: workspace is the repository root on the user's machine;
+                      empty means /workspace.
+                    type: string
+                type: object
+              repo:
+                description: repo describes the repository the thread works on.
+                properties:
+                  baseCommit:
+                    description: baseCommit is the commit on the remote that the uploaded
+                      delta builds on; empty means a full-history upload.
+                    pattern: ^([0-9a-f]{40}|[0-9a-f]{64})?$
+                    type: string
+                  baseRef:
+                    description: baseRef is the remote branch the base commit came
+                      from.
+                    type: string
+                  handoffCommit:
+                    description: handoffCommit is the commit holding the user's state
+                      at handoff, including uncommitted changes.
+                    pattern: ^([0-9a-f]{40}|[0-9a-f]{64})$
+                    type: string
+                  localBranch:
+                    description: localBranch is the branch checked out on the user's
+                      machine at handoff.
+                    type: string
+                  name:
+                    description: name is the checkout directory's base name, for display.
+                    minLength: 1
+                    type: string
+                  remoteURL:
+                    description: remoteURL is the raw configured remote URL; empty
+                      means the whole history was uploaded.
+                    type: string
+                required:
+                - handoffCommit
+                - name
+                type: object
+              secretEnv:
+                description: secretEnv are environment variable names shipped as secrets;
+                  Secret <thread>-secrets holds them as env.<NAME>.
+                items:
+                  type: string
+                maxItems: 64
+                type: array
+              secretFiles:
+                description: secretFiles are workspace-relative files shipped as secrets;
+                  Secret <thread>-secrets holds them as file-<i>.
+                items:
+                  type: string
+                maxItems: 32
+                type: array
+              thinking:
+                description: thinking is the thinking level used for every turn; empty
+                  means the agent's.
+                enum:
+                - "off"
+                - minimal
+                - low
+                - medium
+                - high
+                - xhigh
+                - max
+                type: string
+              title:
+                description: title is the first line of the first message.
+                maxLength: 80
+                type: string
+            required:
+            - agentRef
+            - author
+            - owner
+            - repo
+            type: object
+          status:
+            description: status defines the observed state of OmpThread
+            properties:
+              activeSession:
+                description: activeSession is the OmpSession currently serving the
+                  thread.
+                type: string
+              conditions:
+                description: conditions are the thread's conditions.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastActivityAt:
+                description: lastActivityAt is the latest of the thread's creation
+                  and turn timestamps.
+                format: date-time
+                type: string
+              latest:
+                description: latest is the newest finished turn.
+                properties:
+                  completedAt:
+                    description: completedAt is when the turn finished.
+                    format: date-time
+                    type: string
+                  error:
+                    description: error is why the turn failed.
+                    maxLength: 1000
+                    type: string
+                  id:
+                    description: id is the turn number.
+                    format: int32
+                    type: integer
+                  reply:
+                    description: reply is the start of the agent's reply.
+                    maxLength: 3000
+                    type: string
+                  state:
+                    description: state is the turn state.
+                    enum:
+                    - queued
+                    - running
+                    - done
+                    - failed
+                    - cancelled
+                    type: string
+                  title:
+                    description: title is the first line of the reply.
+                    maxLength: 80
+                    type: string
+                required:
+                - id
+                - state
+                type: object
+              observedGeneration:
+                description: observedGeneration is the generation the status reflects.
+                format: int64
+                type: integer
+              phase:
+                description: phase is Working while a turn is queued or running, else
+                  Idle.
+                enum:
+                - Working
+                - Idle
+                type: string
+              queued:
+                description: queued is the number of turns waiting for a sitting.
+                format: int32
+                type: integer
+              result:
+                description: result is the newest result branch state.
+                properties:
+                  base:
+                    description: base is the commit the result is a delta from.
+                    type: string
+                  branch:
+                    description: branch is the result branch name.
+                    type: string
+                  deletions:
+                    description: deletions is the number of lines removed against
+                      base.
+                    format: int32
+                    type: integer
+                  filesChanged:
+                    description: filesChanged is the number of files changed against
+                      base.
+                    format: int32
+                    type: integer
+                  head:
+                    description: head is the commit the result branch points at.
+                    type: string
+                  insertions:
+                    description: insertions is the number of lines added against base.
+                    format: int32
+                    type: integer
+                  pushError:
+                    description: pushError is why the last push failed.
+                    maxLength: 300
+                    type: string
+                  pushed:
+                    description: pushed reports that head was pushed to the thread's
+                      remote.
+                    type: boolean
+                  updatedAt:
+                    description: updatedAt is when the result last changed.
+                    format: date-time
+                    type: string
+                required:
+                - updatedAt
+                type: object
+              turns:
+                description: turns is the number of turns, in any state.
+                format: int32
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -6,6 +6,7 @@ resources:
 - bases/omp.techdufus.com_omptriggers.yaml
 - bases/omp.techdufus.com_ompsessions.yaml
 - bases/omp.techdufus.com_ompactions.yaml
+- bases/omp.techdufus.com_ompthreads.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

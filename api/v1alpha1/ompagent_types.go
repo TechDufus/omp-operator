@@ -92,6 +92,10 @@ type OmpAgentSpec struct {
 	// pod overrides are merged into the session pod's main container.
 	// +optional
 	Pod PodOverrides `json:"pod,omitzero"`
+
+	// cloud enables OmpThreads (cloud agents) on this agent: long-lived conversations handed off from a local omp.
+	// +optional
+	Cloud *CloudSpec `json:"cloud,omitempty"`
 }
 
 // ModelSpec selects the model and how it is reached.
@@ -133,10 +137,49 @@ type GatewaySpec struct {
 
 // ToolsSpec configures omp's built-in tools.
 type ToolsSpec struct {
-	// allow lists omp built-in tool names the agent may use.
+	// allow lists omp built-in tool names the agent may use; exactly ["*"] means every built-in tool.
 	// +kubebuilder:default={"read","grep","glob","bash","todo"}
 	// +optional
 	Allow []string `json:"allow,omitempty"`
+}
+
+// CloudSpec configures cloud threads of an agent. Its presence enables threads.
+type CloudSpec struct {
+	// idleTimeout is how long a sitting waits for the next message before it saves state and exits.
+	// +kubebuilder:default="10m"
+	// +optional
+	IdleTimeout metav1.Duration `json:"idleTimeout,omitzero"`
+
+	// maxSitting bounds one sitting: it takes no turn that could end past this, and the next message starts a new pod.
+	// +kubebuilder:default="4h"
+	// +optional
+	MaxSitting metav1.Duration `json:"maxSitting,omitzero"`
+
+	// threadRetention is how long an idle thread is kept after its last activity.
+	// +kubebuilder:default="168h"
+	// +optional
+	ThreadRetention metav1.Duration `json:"threadRetention,omitzero"`
+
+	// git lists the git hosts threads may fetch from and push to.
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	Git []CloudGitHost `json:"git,omitempty"`
+}
+
+// CloudGitHost authenticates a git host for cloud threads.
+type CloudGitHost struct {
+	// host is the hostname, for example github.com.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
+	// +required
+	Host string `json:"host"`
+
+	// auth authenticates fetches (and pushes) to the host.
+	// +required
+	Auth GitAuth `json:"auth"`
+
+	// push pushes the result branch omp-cloud/<thread> to the thread's remote after every turn.
+	// +optional
+	Push bool `json:"push,omitempty"`
 }
 
 // SkillSource is one source of skills; exactly one member is set.
@@ -356,6 +399,13 @@ type LimitsSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	NonCriticalSessionsPerDay int32 `json:"nonCriticalSessionsPerDay,omitempty"`
+
+	// maxConcurrentSessions is how many sessions of the agent run at once.
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
+	// +optional
+	MaxConcurrentSessions int32 `json:"maxConcurrentSessions,omitempty"`
 }
 
 // NotifySink is a notification destination; the member named by type is set.

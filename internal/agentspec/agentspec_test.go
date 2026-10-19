@@ -19,6 +19,9 @@ package agentspec
 import (
 	"strings"
 	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ompv1alpha1 "github.com/TechDufus/omp-operator/api/v1alpha1"
 )
@@ -163,6 +166,33 @@ func TestValidate(t *testing.T) {
 		{"notify ok", func(s *ompv1alpha1.OmpAgentSpec) {
 			s.Notify = []ompv1alpha1.NotifySink{{Type: ompv1alpha1.SinkSlack, Slack: &ompv1alpha1.SlackSink{WebhookURLSecretRef: ref("s")}}}
 		}, "", ""},
+		{"tools all alone", func(s *ompv1alpha1.OmpAgentSpec) { s.Tools.Allow = []string{"*"} }, "", ""},
+		{"tools all mixed", func(s *ompv1alpha1.OmpAgentSpec) { s.Tools.Allow = []string{"read", "*"} }, ReasonInvalidSpec, "tools.allow"},
+		{"cloud defaults", func(s *ompv1alpha1.OmpAgentSpec) { s.Cloud = &ompv1alpha1.CloudSpec{} }, "", ""},
+		{"cloud idleTimeout bounds ok", func(s *ompv1alpha1.OmpAgentSpec) {
+			s.Cloud = &ompv1alpha1.CloudSpec{IdleTimeout: dur(time.Minute), MaxSitting: dur(24 * time.Hour), ThreadRetention: dur(time.Hour)}
+		}, "", ""},
+		{"cloud idleTimeout too short", func(s *ompv1alpha1.OmpAgentSpec) {
+			s.Cloud = &ompv1alpha1.CloudSpec{IdleTimeout: dur(59 * time.Second)}
+		}, ReasonInvalidSpec, "cloud.idleTimeout"},
+		{"cloud idleTimeout too long", func(s *ompv1alpha1.OmpAgentSpec) { s.Cloud = &ompv1alpha1.CloudSpec{IdleTimeout: dur(25 * time.Hour)} }, ReasonInvalidSpec, "cloud.idleTimeout"},
+		{"cloud maxSitting too short", func(s *ompv1alpha1.OmpAgentSpec) { s.Cloud = &ompv1alpha1.CloudSpec{MaxSitting: dur(9 * time.Minute)} }, ReasonInvalidSpec, "cloud.maxSitting"},
+		{"cloud maxSitting too long", func(s *ompv1alpha1.OmpAgentSpec) { s.Cloud = &ompv1alpha1.CloudSpec{MaxSitting: dur(25 * time.Hour)} }, ReasonInvalidSpec, "cloud.maxSitting"},
+		{"cloud threadRetention too short", func(s *ompv1alpha1.OmpAgentSpec) {
+			s.Cloud = &ompv1alpha1.CloudSpec{ThreadRetention: dur(59 * time.Minute)}
+		}, ReasonInvalidSpec, "cloud.threadRetention"},
+		{"cloud git ok", func(s *ompv1alpha1.OmpAgentSpec) {
+			s.Cloud = &ompv1alpha1.CloudSpec{Git: []ompv1alpha1.CloudGitHost{cloudHost("github.com"), cloudHost("git.example.com")}}
+		}, "", ""},
+		{"cloud git duplicate host", func(s *ompv1alpha1.OmpAgentSpec) {
+			s.Cloud = &ompv1alpha1.CloudSpec{Git: []ompv1alpha1.CloudGitHost{cloudHost("github.com"), cloudHost("github.com")}}
+		}, ReasonInvalidSpec, "more than once"},
+		{"cloud git bad host", func(s *ompv1alpha1.OmpAgentSpec) {
+			s.Cloud = &ompv1alpha1.CloudSpec{Git: []ompv1alpha1.CloudGitHost{cloudHost("GitHub.com")}}
+		}, ReasonInvalidSpec, "hostname"},
+		{"cloud git auth missing", func(s *ompv1alpha1.OmpAgentSpec) {
+			s.Cloud = &ompv1alpha1.CloudSpec{Git: []ompv1alpha1.CloudGitHost{{Host: "github.com"}}}
+		}, ReasonInvalidSpec, "cloud.git[0].auth"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -182,6 +212,57 @@ func TestValidate(t *testing.T) {
 				t.Errorf("got %s: %q, want %s containing %q", p.Reason, p.Message, tt.reason, tt.substr)
 			}
 		})
+	}
+}
+
+func dur(d time.Duration) metav1.Duration { return metav1.Duration{Duration: d} }
+
+func cloudHost(host string) ompv1alpha1.CloudGitHost {
+	return ompv1alpha1.CloudGitHost{Host: host, Auth: ompv1alpha1.GitAuth{TokenSecretRef: new(ref("tok"))}}
+}
+
+func TestValidateCloudAgentName(t *testing.T) {
+	tests := []struct {
+		name  string
+		cloud bool
+		want  bool // valid
+	}{
+		{strings.Repeat("a", 50), true, true},
+		{strings.Repeat("a", 51), true, false},
+		{strings.Repeat("a", 51), false, true},
+	}
+	for _, tt := range tests {
+		a := base()
+		a.Name = tt.name
+		if tt.cloud {
+			a.Spec.Cloud = &ompv1alpha1.CloudSpec{}
+		}
+		p := Validate(a)
+		if tt.want && p != nil {
+			t.Errorf("%d chars cloud=%v: unexpected problem %v", len(tt.name), tt.cloud, p)
+		}
+		if !tt.want && (p == nil || p.Reason != ReasonInvalidSpec || !strings.Contains(p.Message, "at most 50")) {
+			t.Errorf("%d chars cloud=%v: got %v, want InvalidSpec about 50 characters", len(tt.name), tt.cloud, p)
+		}
+	}
+}
+
+func TestCheckEnvName(t *testing.T) {
+	tests := []struct{ name, want string }{
+		{"TOKEN", ""},
+		{"HOMEDIR", ""},
+		{"1BAD", "not a valid"},
+		{"HOME", "reserved"},
+		{"PATH", "reserved"},
+		{"KUBECONFIG", "reserved"},
+		{"OMP_X", "OMP_"},
+		{"MISE_X", "MISE_"},
+	}
+	for _, tt := range tests {
+		got := CheckEnvName(tt.name)
+		if (tt.want == "") != (got == "") || !strings.Contains(got, tt.want) {
+			t.Errorf("CheckEnvName(%q) = %q, want containing %q", tt.name, got, tt.want)
+		}
 	}
 }
 
@@ -213,6 +294,7 @@ func TestSecretRefsCoversEverySource(t *testing.T) {
 		Skills: []ompv1alpha1.SkillSource{{Git: &ompv1alpha1.GitSkillSource{URL: "u", Auth: &ompv1alpha1.GitAuth{TokenSecretRef: new(ref("skill-tok"))}}}},
 		Workspace: &ompv1alpha1.WorkspaceSpec{Git: &ompv1alpha1.GitWorkspaceSource{URL: "u", Auth: &ompv1alpha1.GitAuth{
 			SSHKeySecretRef: new(ref("ws-key")), KnownHostsSecretRef: new(ref("ws-kh"))}}},
+		Cloud: &ompv1alpha1.CloudSpec{Git: []ompv1alpha1.CloudGitHost{cloudHost("github.com")}},
 		Notify: []ompv1alpha1.NotifySink{
 			{Type: ompv1alpha1.SinkNtfy, Ntfy: &ompv1alpha1.NtfySink{TopicSecretRef: ref("topic")}},
 			{Type: ompv1alpha1.SinkWebhook, Webhook: &ompv1alpha1.WebhookSink{URLSecretRef: ref("hook"), HMACSecretRef: new(ref("hmac"))}},
@@ -222,7 +304,7 @@ func TestSecretRefsCoversEverySource(t *testing.T) {
 	for _, u := range SecretRefs(&spec) {
 		got = append(got, u.Ref.Name)
 	}
-	want := "gw cred mcp-env mcp-hdr skill-tok ws-key ws-kh topic hook hmac"
+	want := "gw cred mcp-env mcp-hdr skill-tok ws-key ws-kh tok topic hook hmac"
 	if strings.Join(got, " ") != want {
 		t.Errorf("SecretRefs = %v, want %s", got, want)
 	}

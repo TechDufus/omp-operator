@@ -64,6 +64,98 @@ spec:
                       - name
                     type: object
                   type: array
+                cloud:
+                  description: 'cloud enables OmpThreads (cloud agents) on this agent: long-lived conversations handed off from a local omp.'
+                  properties:
+                    git:
+                      description: git lists the git hosts threads may fetch from and push to.
+                      items:
+                        description: CloudGitHost authenticates a git host for cloud threads.
+                        properties:
+                          auth:
+                            description: auth authenticates fetches (and pushes) to the host.
+                            properties:
+                              knownHostsSecretRef:
+                                description: knownHostsSecretRef is the known_hosts file; required with sshKeySecretRef.
+                                properties:
+                                  key:
+                                    description: key is the key inside the Secret.
+                                    minLength: 1
+                                    type: string
+                                  name:
+                                    description: name is the Secret name.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                  - key
+                                  - name
+                                type: object
+                              sshKeySecretRef:
+                                description: sshKeySecretRef is the private key used for SSH remotes.
+                                properties:
+                                  key:
+                                    description: key is the key inside the Secret.
+                                    minLength: 1
+                                    type: string
+                                  name:
+                                    description: name is the Secret name.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                  - key
+                                  - name
+                                type: object
+                              tokenSecretRef:
+                                description: tokenSecretRef is the access token used for HTTPS remotes.
+                                properties:
+                                  key:
+                                    description: key is the key inside the Secret.
+                                    minLength: 1
+                                    type: string
+                                  name:
+                                    description: name is the Secret name.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                  - key
+                                  - name
+                                type: object
+                              username:
+                                default: x-access-token
+                                description: username is the HTTP basic-auth user paired with the token; ignored with SSH.
+                                type: string
+                            type: object
+                            x-kubernetes-validations:
+                              - message: exactly one of sshKeySecretRef or tokenSecretRef must be set
+                                rule: '[has(self.sshKeySecretRef), has(self.tokenSecretRef)].exists_one(x, x)'
+                              - message: sshKeySecretRef and knownHostsSecretRef must be set together
+                                rule: has(self.sshKeySecretRef) == has(self.knownHostsSecretRef)
+                          host:
+                            description: host is the hostname, for example github.com.
+                            pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                            type: string
+                          push:
+                            description: push pushes the result branch omp-cloud/<thread> to the thread's remote after every turn.
+                            type: boolean
+                        required:
+                          - auth
+                          - host
+                        type: object
+                      maxItems: 16
+                      type: array
+                    idleTimeout:
+                      default: 10m
+                      description: idleTimeout is how long a sitting waits for the next message before it saves state and exits.
+                      type: string
+                    maxSitting:
+                      default: 4h
+                      description: 'maxSitting bounds one sitting: it takes no turn that could end past this, and the next message starts a new pod.'
+                      type: string
+                    threadRetention:
+                      default: 168h
+                      description: threadRetention is how long an idle thread is kept after its last activity.
+                      type: string
+                  type: object
                 credentials:
                   description: credentials are secrets exposed to the agent's tools; the agent is told their name, description and location, never the value.
                   items:
@@ -134,6 +226,13 @@ spec:
                       default: 4
                       description: maxAttempts is the attempts a session gets before it fails.
                       format: int32
+                      minimum: 1
+                      type: integer
+                    maxConcurrentSessions:
+                      default: 1
+                      description: maxConcurrentSessions is how many sessions of the agent run at once.
+                      format: int32
+                      maximum: 20
                       minimum: 1
                       type: integer
                     nonCriticalSessionsPerDay:
@@ -2856,7 +2955,7 @@ spec:
                         - glob
                         - bash
                         - todo
-                      description: allow lists omp built-in tool names the agent may use.
+                      description: allow lists omp built-in tool names the agent may use; exactly ["*"] means every built-in tool.
                       items:
                         type: string
                       type: array
