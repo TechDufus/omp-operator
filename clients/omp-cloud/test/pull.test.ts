@@ -108,7 +108,7 @@ describe("conversation transfer", () => {
 		expect(dest).toBe(join(sessionDir, "new.jsonl"));
 		expect(await readFile(dest, "utf8")).toBe("new");
 		expect((await stat(join(sessionDir, "new", "artifact.txt"))).isFile()).toBe(true);
-		expect(await readdir(sessionDir)).toEqual(["new", "new.jsonl"]);
+		expect((await readdir(sessionDir)).sort()).toEqual(["new", "new.jsonl"]);
 	});
 
 	test("a tarball without a session file is an error", async () => {
