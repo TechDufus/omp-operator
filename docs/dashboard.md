@@ -1,7 +1,8 @@
 # Dashboard
 
-A read-only web UI on port 8080 (Service port `web`): agents, triggers, sessions, their reports and
-transcripts. It has no JavaScript, no write operations and answers only GET and HEAD (405 otherwise).
+A read-only web UI on port 8080 (Service port `web`): agents, triggers, sessions, cloud threads, their reports and
+transcripts. It has no JavaScript, no write operations and answers only GET and HEAD (405 otherwise). The same port
+serves the [cloud API](reference/cloud-api.md) under `/api/`.
 
 Without a configured sign-in method every page except `/healthz` answers `503 dashboard access not
 configured`. With a sign-in method but no matching access rule, a signed-in user sees nothing.
@@ -29,11 +30,14 @@ oidc:                       # optional
   groupsClaim: groups
 basic:                      # optional
   htpasswdFile: /etc/omp-operator/basic/htpasswd    # bcrypt entries only
+apiTokens:                  # optional, cloud API bearer tokens
+  - {name: laptop, tokenFile: /etc/omp-operator/tokens/laptop/token}
+  - {name: ci, sha256: "<64 hex characters>"}
 rules:
   - users: ["alice@example.com", "basic:ops"]
     groups: ["platform"]
     namespaces: ["*"]
-    role: viewer
+    role: viewer            # or operator
 ```
 
 You do not write this file by hand with the chart; the values map as follows.
@@ -45,6 +49,8 @@ You do not write this file by hand with the chart; the values map as follows.
 | `dashboard.oidc.clientSecret.existingSecret`, `.key` | Mounted at `/etc/omp-operator/oidc/client-secret`; `oidc.clientSecretFile` |
 | `dashboard.basic.existingSecret` | A Secret with key `htpasswd`, mounted at `/etc/omp-operator/basic/htpasswd`; enables `basic` |
 | `dashboard.access` | `rules`, as is |
+| `dashboard.apiTokens[]` | `apiTokens`: `{name, sha256}` as is, or `{name, existingSecret, key}` (`key` defaults to `token`): the Secret key is mounted at `/etc/omp-operator/tokens/<name>/token` and rendered as `tokenFile` |
+| `cloud.maxUploadBytes` | Not in the access file: flag `--cloud-max-upload-bytes` |
 
 The `scopes` always include `openid`. `usernameClaim` defaults to `email`, `groupsClaim` to `groups`. The
 htpasswd file has `name:hash` lines, only bcrypt hashes are accepted (`htpasswd -nBC 12 <name>`), and a user
@@ -55,11 +61,19 @@ named `ops` is matched in rules as `basic:ops`.
 A rule grants a role on namespaces to users and groups. A user matches a rule when their username is in
 `users` (an OIDC username, or `basic:<name>`) or any of their groups is in `groups`. `namespaces` lists the
 granted namespaces; `*` means every namespace the operator serves. A user's access is the union of
-their matching rules. `role` defaults to `viewer`, the only role in v0.1; any other value is rejected at
-start.
+their matching rules. `role` is `viewer` (the default) or `operator`, which includes `viewer`; any other value is
+rejected at start. The dashboard itself only ever needs `viewer`; `operator` matters for the cloud API.
 
 A user only ever sees objects in granted namespaces. Everything else, including a namespace that does
 not exist, is a plain `404`.
+
+### API tokens
+
+`apiTokens` are bearer tokens for the [cloud API](reference/cloud-api.md), never for dashboard pages. Each has a
+`name` (lowercase letters, digits and `-`, unique) and exactly one of `sha256` (hex sha256 of the token) or
+`tokenFile` (read at start, trimmed, at least 32 characters). A token named `laptop` is the principal `token:laptop`
+in rules; give it `role: operator` to let it create threads. Without any `apiTokens` the API answers
+`503 cloud API not configured`. Generate a token with `openssl rand -hex 32` and keep it in a Secret.
 
 ## Sign-in
 
@@ -86,6 +100,7 @@ configured, browsers are sent to OIDC and scripts can still use basic credential
 | `/agents/{namespace}/{name}` | Model, tools, skill sources, workspace, credentials (name, description and where, **never values**), MCP server names, actions, triggers, budgets, newest 100 sessions |
 | `/triggers/{namespace}/{name}` | Type, hook URL (with `--hooks-public-url`), adapter, filters, mapping, grouping, groups, schedule, newest sessions |
 | `/sessions/{namespace}/{name}` | Header, summary, proposed commands, actions, the last 200 events, report, error, usage, continuity and a transcript link. Refreshes every 10 seconds while Pending or Running |
+| `/threads/{namespace}/{name}` | Cloud thread: title, owner, phase, model, repository, result (head, changes, push state), turns with their replies, and the last 100 events of the newest sitting. Refreshes every 10 seconds while Working |
 | `/sessions/{namespace}/{name}/transcript` | The exported omp transcript |
 
 Pages escape all content. Every response sends `X-Content-Type-Options: nosniff`, `Referrer-Policy:

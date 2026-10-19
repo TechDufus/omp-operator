@@ -50,6 +50,11 @@ type accessFile struct {
 	Basic struct {
 		HtpasswdFile string `json:"htpasswdFile"`
 	} `json:"basic"`
+	APITokens []struct {
+		Name      string `json:"name"`
+		SHA256    string `json:"sha256"`
+		TokenFile string `json:"tokenFile"`
+	} `json:"apiTokens"`
 	Rules []struct {
 		Users      []string `json:"users"`
 		Groups     []string `json:"groups"`
@@ -157,5 +162,68 @@ func TestOIDCRequiresItsInputs(t *testing.T) {
 				t.Fatal("helm template succeeded, want a required-value error")
 			}
 		})
+	}
+}
+
+func TestAPITokens(t *testing.T) {
+	hash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	values := dashboardValues(nil)
+	values[keyDashboard].(map[string]any)["apiTokens"] = []any{
+		map[string]any{"name": "ci", "sha256": hash},
+		map[string]any{"name": "laptop", keyExisting: "omp-token-laptop"},
+		map[string]any{"name": "phone", keyExisting: "omp-token-phone", "key": "secret"},
+	}
+	values["cloud"] = map[string]any{"maxUploadBytes": 2147483648}
+	r := render(t, values)
+
+	var got accessFile
+	raw := r.configMaps["omp-operator-access"].Data["access.yaml"]
+	if err := yaml.UnmarshalStrict([]byte(raw), &got); err != nil {
+		t.Fatalf("access.yaml: %v\n%s", err, raw)
+	}
+	eq(t, "apiTokens", len(got.APITokens), 3)
+	eq(t, "ci name", got.APITokens[0].Name, "ci")
+	eq(t, "ci sha256", got.APITokens[0].SHA256, hash)
+	eq(t, "ci tokenFile", got.APITokens[0].TokenFile, "")
+	eq(t, "laptop sha256", got.APITokens[1].SHA256, "")
+	eq(t, "laptop tokenFile", got.APITokens[1].TokenFile, "/etc/omp-operator/tokens/laptop/token")
+	eq(t, "phone tokenFile", got.APITokens[2].TokenFile, "/etc/omp-operator/tokens/phone/token")
+
+	ps := r.deployments[operatorName].Spec.Template.Spec
+	mounts := mountPaths(ps.Containers[0])
+	eq(t, "laptop mount", mounts["/etc/omp-operator/tokens/laptop"], "api-token-laptop")
+	eq(t, "phone mount", mounts["/etc/omp-operator/tokens/phone"], "api-token-phone")
+	_, hashMounted := mounts["/etc/omp-operator/tokens/ci"]
+	yes(t, "a sha256 token mounts nothing", !hashMounted)
+	volumes := map[string][2]string{
+		"api-token-laptop": {"omp-token-laptop", "token"},
+		"api-token-phone":  {"omp-token-phone", "secret"},
+	}
+	for name, want := range volumes {
+		v := volumeByName(ps.Volumes, name)
+		if v.Secret == nil || len(v.Secret.Items) != 1 {
+			t.Fatalf("%s volume: %+v", name, v)
+		}
+		eq(t, name+" secret", v.Secret.SecretName, want[0])
+		eq(t, name+" key", v.Secret.Items[0].Key, want[1])
+		eq(t, name+" path", v.Secret.Items[0].Path, "token")
+	}
+	yes(t, "--cloud-max-upload-bytes", slices.Contains(managerArgs(t, r), "--cloud-max-upload-bytes=2147483648"))
+}
+
+func TestAPITokenDefaults(t *testing.T) {
+	r := render(t, nil)
+	yes(t, "default upload limit", slices.Contains(managerArgs(t, r), "--cloud-max-upload-bytes=1073741824"))
+	var got accessFile
+	if err := yaml.UnmarshalStrict([]byte(r.configMaps["omp-operator-access"].Data["access.yaml"]), &got); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "no apiTokens by default", len(got.APITokens), 0)
+}
+
+func TestAPITokenRequiresSecretOrHash(t *testing.T) {
+	values := map[string]any{keyDashboard: map[string]any{"apiTokens": []any{map[string]any{"name": "x"}}}}
+	if _, err := helm(t, values); err == nil {
+		t.Fatal("helm template succeeded, want a required-value error")
 	}
 }

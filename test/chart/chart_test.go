@@ -117,6 +117,7 @@ func TestDefaultsDeployment(t *testing.T) {
 		"--service-name=omp-operator", "--data-dir=/data",
 		"--default-runtime-image=" + defaultRuntimeImage,
 		"--dashboard-url=", "--hooks-public-url=", "--access-config=/etc/omp-operator/access.yaml",
+		"--cloud-max-upload-bytes=1073741824",
 	})
 
 	eq(t, "data claim", deref(volumeByName(ps.Volumes, "data").PersistentVolumeClaim).ClaimName, "omp-operator-data")

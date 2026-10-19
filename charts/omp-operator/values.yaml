@@ -29,6 +29,18 @@ dashboard:
   #     namespaces: ["*"]
   #     role: viewer
   access: []
+  # Cloud API bearer tokens (see docs/reference/cloud-api.md). Each is {name, sha256} (hex sha256 of the token)
+  # or {name, existingSecret, key} (key defaults to "token"); grant them in access rules as "token:<name>"
+  # with role viewer or operator:
+  #   apiTokens:
+  #     - {name: laptop, existingSecret: omp-cloud-laptop}
+  #   access:
+  #     - {users: ["token:laptop"], namespaces: ["*"], role: operator}
+  apiTokens: []
+
+cloud:
+  # Largest repository bundle the cloud API accepts, in bytes.
+  maxUploadBytes: 1073741824
 
 hooks:
   publicURL: ""

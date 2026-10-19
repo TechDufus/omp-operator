@@ -51,9 +51,9 @@ dd{margin:0;overflow-wrap:anywhere}
 pre{background:var(--card);border:1px solid var(--line);padding:.6rem .8rem;margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
 code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
 .b{display:inline-block;padding:0 .45rem;border-radius:.7rem;border:1px solid var(--line);font-size:.85em;white-space:nowrap}
-.True,.ok,.fixed,.Succeeded{color:var(--ok)}
-.needs_owner,.inconclusive,.Pending,.Running,.Unknown{color:var(--warn)}
-.False,.failed,.Failed{color:var(--bad)}
+.True,.ok,.fixed,.Succeeded,.done{color:var(--ok)}
+.needs_owner,.inconclusive,.Pending,.Running,.Unknown,.Working,.queued,.running{color:var(--warn)}
+.False,.failed,.Failed,.cancelled{color:var(--bad)}
 ul{margin:.2rem 0;padding-left:1.2rem}
 @media (max-width:40rem){dl{grid-template-columns:1fr}dt{margin-top:.4rem}}
 </style>
@@ -75,6 +75,11 @@ ul{margin:.2rem 0;padding-left:1.2rem}
 <tbody>
 {{range .}}<tr><td><a href="{{.Link}}">{{if .Namespace}}{{.Namespace}}/{{end}}{{.Name}}</a></td><td>{{.Agent}}</td><td>{{.Trigger}}</td><td>{{.Kind}}</td><td><span class="{{.Phase}}">{{.Phase}}</span></td><td><span class="{{.Verdict}}">{{.Verdict}}</span></td><td>{{.Title}}</td><td title="{{.Created}}">{{.Age}}</td></tr>
 {{end}}</tbody></table></div>{{else}}<p class="muted">No sessions.</p>{{end}}{{end}}
+{{define "threads"}}{{if .}}<div class="scroll"><table>
+<thead><tr><th>Thread</th><th>Agent</th><th>Phase</th><th>Turns</th><th>Latest</th><th>Title</th><th>Age</th></tr></thead>
+<tbody>
+{{range .}}<tr><td><a href="{{.Link}}">{{.Namespace}}/{{.Name}}</a></td><td>{{.Agent}}</td><td><span class="{{.Phase}}">{{.Phase}}</span></td><td>{{.Turns}}</td><td><span class="{{.Latest}}">{{.Latest}}</span></td><td>{{.Title}}</td><td title="{{.Created}}">{{.Age}}</td></tr>
+{{end}}</tbody></table></div>{{else}}<p class="muted">No threads.</p>{{end}}{{end}}
 {{define "triggers"}}{{if .}}<div class="scroll"><table>
 <thead><tr><th>Trigger</th><th>Agent</th><th>Type</th><th>Enabled</th><th>Ready</th></tr></thead>
 <tbody>
@@ -96,6 +101,8 @@ const indexTmpl = `{{define "body"}}
 {{end}}</tbody></table></div>{{else}}<p class="muted">No agents.</p>{{end}}
 <h2>Triggers</h2>
 {{template "triggers" .Triggers}}
+<h2>Threads</h2>
+{{template "threads" .Threads}}
 <h2>Newest sessions</h2>
 {{template "sessions" .Sessions}}
 {{end}}`
@@ -170,6 +177,7 @@ const sessionTmpl = `{{define "body"}}
 {{if .Trigger}}<dt>Trigger</dt><dd><a href="{{.TriggerLink}}">{{.Trigger}}</a></dd>{{end}}
 <dt>Kind</dt><dd>{{.Kind}}</dd>
 {{if .Event}}<dt>Event</dt><dd>{{.Event}}</dd>{{end}}
+{{if .ThreadLink}}<dt>Thread</dt><dd><a href="{{.ThreadLink}}">{{.Thread}}</a></dd>{{end}}
 <dt>Phase</dt><dd><span class="{{.Phase}}">{{.Phase}}</span>{{if .Outcome}} <span class="muted">outcome {{.Outcome}}</span>{{end}}</dd>
 <dt>Verdict</dt><dd><span class="{{.Verdict}}">{{if .Verdict}}{{.Verdict}}{{else}}-{{end}}</span></dd>
 <dt>Title</dt><dd>{{if .Title}}{{.Title}}{{else}}-{{end}}</dd>
@@ -199,6 +207,49 @@ const sessionTmpl = `{{define "body"}}
 {{end}}</tbody></table></div>{{end}}
 {{end}}`
 
+const threadTmpl = `{{define "body"}}
+<dl>
+<dt>Thread</dt><dd>{{.Namespace}}/{{.Name}}</dd>
+<dt>Title</dt><dd>{{if .Title}}{{.Title}}{{else}}-{{end}}</dd>
+<dt>Agent</dt><dd><a href="{{.AgentLink}}">{{.Agent}}</a></dd>
+<dt>Owner</dt><dd>{{.Owner}}</dd>
+<dt>Phase</dt><dd><span class="{{.Phase}}">{{.Phase}}</span>{{if .Queued}} <span class="muted">{{.Queued}} queued</span>{{end}}</dd>
+<dt>Model</dt><dd>{{if .Model}}<code>{{.Model}}</code>{{else}}agent default{{end}}{{if .Thinking}}, thinking {{.Thinking}}{{end}}</dd>
+<dt>Repository</dt><dd>{{.Repo}}</dd>
+{{if .Base}}<dt>Base</dt><dd><code>{{.Base}}</code></dd>{{end}}
+{{if .LocalBranch}}<dt>Local branch</dt><dd>{{.LocalBranch}}</dd>{{end}}
+<dt>Result branch</dt><dd><code>{{.Branch}}</code></dd>
+{{if .Paths}}<dt>Paths</dt><dd>{{.Paths}}</dd>{{end}}
+{{if .SecretFiles}}<dt>Secret files</dt><dd>{{template "list" .SecretFiles}}</dd>{{end}}
+{{if .SecretEnv}}<dt>Secret env</dt><dd>{{template "list" .SecretEnv}}</dd>{{end}}
+<dt>Turns</dt><dd>{{.TurnCount}}</dd>
+<dt>Created</dt><dd>{{.Created}}</dd>
+<dt>Last activity</dt><dd>{{.LastActivity}}</dd>
+{{if .ActiveSession}}<dt>Active sitting</dt><dd><a href="{{.ActiveLink}}">{{.ActiveSession}}</a></dd>{{end}}
+{{if .Conditions}}<dt>Conditions</dt><dd>{{template "list" .Conditions}}</dd>{{end}}
+</dl>
+<h2>Result</h2>
+{{if .Result}}<dl>
+<dt>Head</dt><dd><code>{{.Result.Head}}</code></dd>
+<dt>Changes</dt><dd>{{.Result.Changes}} in {{.Result.Files}} files</dd>
+<dt>Push</dt><dd>{{.Result.Pushed}}</dd>
+<dt>Pull it</dt><dd><code>{{.PullHint}}</code></dd>
+</dl>{{else}}<p class="muted">No result yet.</p>{{end}}
+<h2>Turns</h2>
+{{if .Turns}}<div class="scroll"><table>
+<thead><tr><th>Turn</th><th>State</th><th>Message</th><th>Title</th><th>Reply</th><th>Error</th><th>Usage</th></tr></thead>
+<tbody>
+{{range .Turns}}<tr><td>{{.ID}}</td><td><span class="{{.State}}">{{.State}}</span></td><td><pre>{{.Text}}</pre></td><td>{{.Title}}</td><td>{{if .Reply}}<pre>{{.Reply}}</pre>{{end}}</td><td>{{.Error}}</td><td>{{.Usage}}{{if .Head}}<br><code>{{.Head}}</code>{{end}}{{if .Push}}<br>{{.Push}}{{end}}</td></tr>
+{{end}}</tbody></table></div>{{else}}<p class="muted">No turns.</p>{{end}}
+{{if .EventsSession}}<h2>Events</h2>
+<p class="muted">Newest sitting: <a href="{{.EventsLink}}">{{.EventsSession}}</a></p>
+{{if .Events}}<div class="scroll"><table>
+<thead><tr><th>At</th><th>Kind</th><th>Text</th></tr></thead>
+<tbody>
+{{range .Events}}<tr><td>{{.At}}</td><td>{{.Kind}}</td><td>{{.Text}}</td></tr>
+{{end}}</tbody></table></div>{{else}}<p class="muted">No events.</p>{{end}}{{end}}
+{{end}}`
+
 const signedOutTmpl = `{{define "body"}}<p>You are signed out.</p><p><a href="/auth/login">Sign in again</a></p>{{end}}`
 
 // templates holds one parsed template set per page, each defining "layout" and its own "body".
@@ -208,6 +259,7 @@ var templates = func() map[string]*template.Template {
 		"agent":     agentTmpl,
 		"trigger":   triggerTmpl,
 		"session":   sessionTmpl,
+		"thread":    threadTmpl,
 		"signedout": signedOutTmpl,
 	}
 	out := make(map[string]*template.Template, len(pages))

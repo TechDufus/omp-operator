@@ -52,6 +52,7 @@ import (
 	"github.com/TechDufus/omp-operator/internal/actions"
 	"github.com/TechDufus/omp-operator/internal/agentapi"
 	"github.com/TechDufus/omp-operator/internal/celx"
+	"github.com/TechDufus/omp-operator/internal/cloudapi"
 	"github.com/TechDufus/omp-operator/internal/config"
 	"github.com/TechDufus/omp-operator/internal/controller"
 	"github.com/TechDufus/omp-operator/internal/dashboard"
@@ -60,6 +61,7 @@ import (
 	"github.com/TechDufus/omp-operator/internal/metrics"
 	"github.com/TechDufus/omp-operator/internal/notify"
 	"github.com/TechDufus/omp-operator/internal/store"
+	"github.com/TechDufus/omp-operator/internal/threads"
 )
 
 // version is set at build time with -ldflags "-X main.version=<tag>".
@@ -82,6 +84,7 @@ type flags struct {
 	serviceName, dataDir, defaultRuntimeImage                string
 	dashboardURL, hooksPublicURL, gatewayClientsSecret       string
 	agentNamespaces, actionTargetNamespaces, accessConfig    string
+	cloudMaxUploadBytes                                      int64
 }
 
 func main() {
@@ -103,6 +106,8 @@ func main() {
 	flag.StringVar(&f.actionTargetNamespaces, "action-target-namespaces", "",
 		"Comma list (or *) of namespaces actions may target besides their own.")
 	flag.StringVar(&f.accessConfig, "access-config", "/etc/omp-operator/access.yaml", "Dashboard access file.")
+	flag.Int64Var(&f.cloudMaxUploadBytes, "cloud-max-upload-bytes", 1<<30,
+		"Largest repository bundle the cloud API accepts, in bytes.")
 	zapOpts := zap.Options{}
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -168,6 +173,7 @@ func run(f flags) error {
 		gw = &gateway.Manager{Client: c, APIReader: apiReader, Options: opts}
 	}
 	runner := &actions.Runner{Client: c, APIReader: apiReader, Store: st, Options: opts}
+	threadLog := threads.NewLog(st)
 
 	if err := (&controller.OmpActionReconciler{Client: c, Scheme: mgr.GetScheme(), Options: opts}).
 		SetupWithManager(mgr); err != nil {
@@ -192,6 +198,12 @@ func run(f flags) error {
 	if err := sessions.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("ompsession controller: %w", err)
 	}
+	if err := (&controller.OmpThreadReconciler{
+		Client: c, Scheme: mgr.GetScheme(), APIReader: apiReader, Options: opts, Store: st,
+		Threads: threadLog, Notifier: dispatcher,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("ompthread controller: %w", err)
+	}
 
 	if gw != nil {
 		if err := mgr.Add(nonLeader(func(ctx context.Context) error {
@@ -211,7 +223,9 @@ func run(f flags) error {
 	hooksHandler := &hooks.Handler{Client: c, APIReader: apiReader, Options: opts, CEL: celCache, Notify: dispatcher}
 	hooksMux := http.NewServeMux()
 	hooksMux.Handle(hooks.PathPrefix, hooksHandler)
-	apiServer := &agentapi.Server{Client: c, APIReader: apiReader, Store: st, Options: opts, Runner: runner}
+	apiServer := &agentapi.Server{
+		Client: c, APIReader: apiReader, Store: st, Options: opts, Runner: runner, Threads: threadLog,
+	}
 
 	servers := []struct {
 		name, addr string
@@ -223,9 +237,17 @@ func run(f flags) error {
 			if err != nil {
 				return nil, fmt.Errorf("dashboard session key: %w", err)
 			}
-			return (&dashboard.Server{
-				Client: c, APIReader: apiReader, Store: st, Options: opts, Access: access, Key: key,
-			}).Handler(), nil
+			dash := (&dashboard.Server{
+				Client: c, APIReader: apiReader, Store: st, Options: opts, Access: access, Key: key, Threads: threadLog,
+			}).Handler()
+			cloud := (&cloudapi.Server{
+				Client: c, APIReader: apiReader, Store: st, Threads: threadLog, Access: access, Options: opts,
+				MaxUploadBytes: f.cloudMaxUploadBytes,
+			}).Handler()
+			root := http.NewServeMux()
+			root.Handle("/api/", cloud)
+			root.Handle("/", dash)
+			return root, nil
 		}},
 		{name: "hooks", addr: f.hooksAddr, handler: func(context.Context) (http.Handler, error) {
 			return hooksMux, nil

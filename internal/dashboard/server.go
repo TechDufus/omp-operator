@@ -32,6 +32,7 @@ import (
 	"github.com/TechDufus/omp-operator/api/v1alpha1"
 	"github.com/TechDufus/omp-operator/internal/config"
 	"github.com/TechDufus/omp-operator/internal/store"
+	"github.com/TechDufus/omp-operator/internal/threads"
 )
 
 const (
@@ -54,8 +55,10 @@ type Server struct {
 	// APIReader reads single objects without the cache.
 	APIReader client.Reader
 	Store     *store.Store
-	Options   *config.Options
-	Access    *Access
+	// Threads is the turn log the thread page reads; nil means one over Store.
+	Threads *threads.Log
+	Options *config.Options
+	Access  *Access
 	// Key signs the session and login-state cookies.
 	Key []byte
 	// Now is the clock; nil means time.Now.
@@ -119,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/agents/{ns}/{name}", s.handleAgent)
 	mux.HandleFunc("/triggers/{ns}/{name}", s.handleTrigger)
 	mux.HandleFunc("/sessions/{ns}/{name}", s.handleSession)
+	mux.HandleFunc("/threads/{ns}/{name}", s.handleThread)
 	mux.HandleFunc("/sessions/{ns}/{name}/transcript", s.handleTranscript)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { notFound(w) })
 

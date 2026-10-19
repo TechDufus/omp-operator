@@ -390,6 +390,7 @@ func triggerRow(t *v1alpha1.OmpTrigger) triggerRowView {
 type indexView struct {
 	Agents   []agentRowView
 	Triggers []triggerRowView
+	Threads  []threadRowView
 	Sessions []sessionRowView
 	NoAccess bool
 }
@@ -412,7 +413,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	v := indexView{Sessions: s.sessionRows(sessions, indexSessions, true)}
+	threadList, err := s.visibleThreads(ctx, p)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	v := indexView{Sessions: s.sessionRows(sessions, indexSessions, true), Threads: s.threadRows(threadList, indexThreads)}
 	for i := range agents {
 		v.Agents = append(v.Agents, s.agentRow(&agents[i], sessions))
 	}
@@ -768,6 +774,7 @@ type actionView struct {
 
 type sessionView struct {
 	Namespace, Name, Agent, AgentLink, Trigger, TriggerLink, Kind string
+	Thread, ThreadLink                                            string
 	Phase, Verdict, Outcome, Title, Summary, Error                string
 	Created, Started, Completed, Pod, Revision                    string
 	Attempts                                                      int32
@@ -808,6 +815,10 @@ func (s *Server) buildSessionView(ss *v1alpha1.OmpSession) sessionView {
 	if tr := ss.Spec.TriggerRef; tr != nil {
 		v.Trigger = tr.Name
 		v.TriggerLink = objectLink("triggers", ss.Namespace, tr.Name)
+	}
+	if tr := ss.Spec.ThreadRef; tr != nil {
+		v.Thread = tr.Name
+		v.ThreadLink = objectLink("threads", ss.Namespace, tr.Name)
 	}
 	if e := ss.Spec.Event; e != nil {
 		v.Event = strings.TrimSpace(fmt.Sprintf("%s (%s) %s", e.Name, e.Severity, e.GroupID))

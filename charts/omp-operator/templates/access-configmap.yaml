@@ -15,6 +15,18 @@
 {{- if .Values.dashboard.basic.existingSecret }}
 {{- $_ := set $access "basic" (dict "htpasswdFile" "/etc/omp-operator/basic/htpasswd") -}}
 {{- end }}
+{{- $tokens := list -}}
+{{- range .Values.dashboard.apiTokens }}
+{{- $name := required "dashboard.apiTokens[].name is required" .name -}}
+{{- if .existingSecret }}
+{{- $tokens = append $tokens (dict "name" $name "tokenFile" (printf "/etc/omp-operator/tokens/%s/token" $name)) -}}
+{{- else }}
+{{- $tokens = append $tokens (dict "name" $name "sha256" (required (printf "dashboard.apiTokens[%s] needs sha256 or existingSecret" $name) .sha256)) -}}
+{{- end }}
+{{- end }}
+{{- if $tokens }}
+{{- $_ := set $access "apiTokens" $tokens -}}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

@@ -22,6 +22,7 @@ The operator binary (`/manager`) takes these flags, plus controller-runtime's za
 | `--agent-namespaces` | empty (all) | `rbac.agentNamespaces` | Comma list of namespaces served |
 | `--action-target-namespaces` | empty | `actions.targetNamespaces` | Comma list, or `*`: namespaces actions may target besides their own |
 | `--access-config` | `/etc/omp-operator/access.yaml` | same | Dashboard access file. A missing file means no sign-in method |
+| `--cloud-max-upload-bytes` | `1073741824` | `cloud.maxUploadBytes` | Largest repository bundle the [cloud API](cloud-api.md) accepts |
 
 The operator runs one replica without leader election. The webhook, dashboard and agent API servers start after
 the caches sync.
@@ -35,7 +36,7 @@ namespaces; Secrets, ConfigMaps and action targets are read uncached.
 
 | Port | Name | Serves |
 |---|---|---|
-| 8080 | `web` | Dashboard |
+| 8080 | `web` | Dashboard, and the cloud API under `/api/` |
 | 8081 | `health` | Probes (container port only, not in the Service) |
 | 8082 | `hooks` | `POST /hooks/<namespace>/<trigger>` |
 | 8083 | `agent` | Agent API |
@@ -112,7 +113,9 @@ ConfigMaps (get), in each of `rbac.agentNamespaces` and the release namespace, o
 | `dashboard.oidc.usernameClaim` | `email` | |
 | `dashboard.oidc.groupsClaim` | `groups` | |
 | `dashboard.basic.existingSecret` | `""` | Secret with key `htpasswd` (bcrypt entries only); setting it enables basic auth |
-| `dashboard.access` | `[]` | Access rules, copied into the access file: `users`, `groups`, `namespaces`, `role` |
+| `dashboard.access` | `[]` | Access rules, copied into the access file: `users`, `groups`, `namespaces`, `role` (`viewer` or `operator`) |
+| `dashboard.apiTokens` | `[]` | Cloud API tokens: `{name, sha256}` or `{name, existingSecret, key}` (`key` defaults to `token`; the Secret key is mounted at `/etc/omp-operator/tokens/<name>/token`). Grant them in `access` as `token:<name>` |
+| `cloud.maxUploadBytes` | `1073741824` | Largest repository bundle the cloud API accepts (`--cloud-max-upload-bytes`) |
 | `hooks.publicURL` | `""` | External hooks URL (`--hooks-public-url`) |
 | `actions.targetNamespaces` | `[]` | Extra namespaces actions may target; `["*"]` for any except the operator's |
 | `persistence.storageClass` | `""` | Data PVC storage class (empty: cluster default) |

@@ -351,7 +351,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	o := s.Access.OIDC
 	name, _ := claims[o.UsernameClaim].(string)
 	name = strings.TrimSpace(name)
-	if name == "" || strings.HasPrefix(name, BasicUserPrefix) {
+	if name == "" || strings.HasPrefix(name, BasicUserPrefix) || strings.HasPrefix(name, TokenUserPrefix) {
 		fail(http.StatusForbidden, "sign-in failed: no usable username claim", fmt.Errorf("claim %q is empty or reserved", o.UsernameClaim))
 		return
 	}

@@ -21,10 +21,14 @@ package dashboard
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -33,16 +37,25 @@ import (
 )
 
 const (
-	// RoleViewer is the only role in v0.1.
+	// RoleViewer may read: the dashboard and the read routes of the cloud API.
 	RoleViewer = "viewer"
+	// RoleOperator may also change things through the cloud API; it includes RoleViewer.
+	RoleOperator = "operator"
 	// BasicUserPrefix prefixes basic-auth user names in access rules.
 	BasicUserPrefix = "basic:"
+	// TokenUserPrefix prefixes cloud API token names in access rules ("token:<name>").
+	TokenUserPrefix = "token:"
 	// AllNamespaces in a rule matches every namespace the operator serves.
 	AllNamespaces = "*"
 
 	defaultUsernameClaim = "email"
 	defaultGroupsClaim   = "groups"
+
+	// minAPITokenLen is the shortest accepted token read from a tokenFile.
+	minAPITokenLen = 32
 )
+
+var tokenNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
 // OIDCConfig configures OpenID Connect sign-in.
 type OIDCConfig struct {
@@ -63,25 +76,44 @@ type BasicConfig struct {
 
 // Rule grants a role on namespaces to users or groups.
 type Rule struct {
-	// Users are OIDC usernames, or "basic:<name>" for basic-auth users.
+	// Users are OIDC usernames, "basic:<name>" for basic-auth users, or "token:<name>" for cloud API tokens.
 	Users []string `json:"users,omitempty"`
 	// Groups are OIDC group names.
 	Groups []string `json:"groups,omitempty"`
 	// Namespaces are the granted namespaces; "*" means every namespace the operator serves.
 	Namespaces []string `json:"namespaces"`
-	// Role is "viewer" (the default and only role).
+	// Role is "viewer" (the default) or "operator", which includes viewer.
 	Role string `json:"role,omitempty"`
+}
+
+// APIToken is a bearer token of the cloud API. Exactly one of SHA256 and
+// TokenFile is set.
+type APIToken struct {
+	// Name identifies the token in rules as "token:<name>".
+	Name string `json:"name"`
+	// SHA256 is the hex sha256 of the token.
+	SHA256 string `json:"sha256,omitempty"`
+	// TokenFile holds the token; it is read at load.
+	TokenFile string `json:"tokenFile,omitempty"`
 }
 
 // Access is the dashboard's authentication configuration and access rules,
 // loaded once at startup with [LoadAccess].
 type Access struct {
-	OIDC  *OIDCConfig  `json:"oidc,omitempty"`
-	Basic *BasicConfig `json:"basic,omitempty"`
-	Rules []Rule       `json:"rules,omitempty"`
+	OIDC      *OIDCConfig  `json:"oidc,omitempty"`
+	Basic     *BasicConfig `json:"basic,omitempty"`
+	APITokens []APIToken   `json:"apiTokens,omitempty"`
+	Rules     []Rule       `json:"rules,omitempty"`
 
 	oidcClientSecret string
 	htpasswd         map[string][]byte // basic user -> bcrypt hash
+	tokens           []tokenHash
+}
+
+// tokenHash is a loaded API token.
+type tokenHash struct {
+	name string
+	sum  [sha256.Size]byte
 }
 
 // LoadAccess reads and validates the access file. A missing file yields an
@@ -150,6 +182,9 @@ func (a *Access) validate() error {
 			return fmt.Errorf("basic.htpasswdFile: %w", err)
 		}
 	}
+	if err := a.loadTokens(); err != nil {
+		return err
+	}
 	for i := range a.Rules {
 		r := &a.Rules[i]
 		if len(r.Users) == 0 && len(r.Groups) == 0 {
@@ -164,11 +199,93 @@ func (a *Access) validate() error {
 		if r.Role == "" {
 			r.Role = RoleViewer
 		}
-		if r.Role != RoleViewer {
-			return fmt.Errorf("rules[%d]: role %q is not supported (only %q)", i, r.Role, RoleViewer)
+		if r.Role != RoleViewer && r.Role != RoleOperator {
+			return fmt.Errorf("rules[%d]: role %q is not supported (use %q or %q)", i, r.Role, RoleViewer, RoleOperator)
 		}
 	}
 	return nil
+}
+
+// loadTokens validates apiTokens and keeps the sha256 of each.
+func (a *Access) loadTokens() error {
+	a.tokens = nil
+	for i := range a.APITokens {
+		t := &a.APITokens[i]
+		if !tokenNamePattern.MatchString(t.Name) {
+			return fmt.Errorf("apiTokens[%d]: name %q must match %s", i, t.Name, tokenNamePattern)
+		}
+		if slices.ContainsFunc(a.tokens, func(o tokenHash) bool { return o.name == t.Name }) {
+			return fmt.Errorf("apiTokens[%d]: duplicate name %q", i, t.Name)
+		}
+		if (t.SHA256 == "") == (t.TokenFile == "") {
+			return fmt.Errorf("apiTokens[%d] (%s): exactly one of sha256 and tokenFile is required", i, t.Name)
+		}
+		th := tokenHash{name: t.Name}
+		if t.SHA256 != "" {
+			raw, err := hex.DecodeString(t.SHA256)
+			if err != nil || len(raw) != sha256.Size {
+				return fmt.Errorf("apiTokens[%d] (%s): sha256 must be 64 hex characters", i, t.Name)
+			}
+			copy(th.sum[:], raw)
+		} else {
+			raw, err := os.ReadFile(t.TokenFile)
+			if err != nil {
+				return fmt.Errorf("apiTokens[%d] (%s): read tokenFile: %w", i, t.Name, err)
+			}
+			tok := strings.TrimSpace(string(raw))
+			if len(tok) < minAPITokenLen {
+				return fmt.Errorf("apiTokens[%d] (%s): token is shorter than %d characters", i, t.Name, minAPITokenLen)
+			}
+			th.sum = sha256.Sum256([]byte(tok))
+		}
+		a.tokens = append(a.tokens, th)
+	}
+	return nil
+}
+
+// TokensConfigured reports whether any API token is configured.
+func (a *Access) TokensConfigured() bool { return a != nil && len(a.tokens) > 0 }
+
+// TokenPrincipal returns the principal "token:<name>" of a bearer token. It
+// compares against every stored hash in constant time.
+func (a *Access) TokenPrincipal(token string) (string, bool) {
+	if a == nil || token == "" {
+		return "", false
+	}
+	sum := sha256.Sum256([]byte(token))
+	name, found := "", 0
+	for i := range a.tokens {
+		eq := subtle.ConstantTimeCompare(sum[:], a.tokens[i].sum[:])
+		if eq == 1 {
+			name = a.tokens[i].name
+		}
+		found |= eq
+	}
+	if found != 1 {
+		return "", false
+	}
+	return TokenUserPrefix + name, true
+}
+
+// Allows reports whether the rules grant user (with groups) at least role on
+// namespace ns: RoleOperator needs an operator rule, RoleViewer any rule. It
+// does not apply the operator's own namespace filter.
+func (a *Access) Allows(user string, groups []string, ns, role string) bool {
+	if a == nil {
+		return false
+	}
+	p := &principal{Name: user, Groups: groups}
+	for i := range a.Rules {
+		r := &a.Rules[i]
+		inScope := slices.Contains(r.Namespaces, AllNamespaces) || slices.Contains(r.Namespaces, ns)
+		if !a.matches(r, p) || !inScope {
+			continue
+		}
+		if role != RoleOperator || r.Role == RoleOperator {
+			return true
+		}
+	}
+	return false
 }
 
 // parseHtpasswd reads "name:hash" lines, accepting bcrypt hashes only.
