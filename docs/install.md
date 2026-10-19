@@ -3,7 +3,7 @@
 Helm is the only supported install path. The chart is published as a signed OCI artifact:
 
 ```sh
-helm install omp oci://ghcr.io/techdufus/charts/omp-operator --version 0.1.0 \
+helm install omp oci://ghcr.io/techdufus/charts/omp-operator --version 0.2.0 \
   -n omp-system --create-namespace
 ```
 
@@ -18,7 +18,7 @@ Images, all `linux/amd64`:
 | `ghcr.io/techdufus/omp-operator` | The operator (controllers, hooks, dashboard, cloud API, agent API) |
 | `ghcr.io/techdufus/omp-operator-runtime` | Session pods, toolsync pods and the auth-gateway. Holds `omp`, `mise`, `git`, `ssh`, `jq`, `python3` and `omp-operator-driver` |
 
-Both tags default to the chart's `appVersion` (`v0.1.0` for chart `0.1.0`).
+Both tags default to the chart's `appVersion` (`v0.2.0` for chart `0.2.0`).
 
 ## What the chart installs
 
@@ -83,7 +83,7 @@ A `digest` pins an image as `repository@digest` and takes precedence over `tag`.
 
 ```sh
 kubectl create namespace platform
-helm install omp oci://ghcr.io/techdufus/charts/omp-operator --version 0.1.0 \
+helm install omp oci://ghcr.io/techdufus/charts/omp-operator --version 0.2.0 \
   -n omp-system --create-namespace --set 'rbac.agentNamespaces={platform}'
 ```
 
@@ -115,7 +115,7 @@ Basic-auth fallback:
 kubectl -n omp-system create secret generic omp-dashboard-basic \
   --from-literal=htpasswd="$(htpasswd -nBC 12 admin)"      # prompts for the password
 
-helm upgrade omp oci://ghcr.io/techdufus/charts/omp-operator --version 0.1.0 -n omp-system --reuse-values \
+helm upgrade omp oci://ghcr.io/techdufus/charts/omp-operator --version 0.2.0 -n omp-system --reuse-values \
   --set dashboard.basic.existingSecret=omp-dashboard-basic \
   --set 'dashboard.access[0].users[0]=basic:admin' \
   --set 'dashboard.access[0].namespaces[0]=*'
@@ -203,5 +203,5 @@ Use these references:
 | Runtime image | `ghcr.io/techdufus/omp-operator-runtime` |
 | Chart | `ghcr.io/techdufus/charts/omp-operator` |
 
-The digests are in the release workflow run's summary. For the chart, `helm pull oci://ghcr.io/techdufus/charts/omp-operator --version 0.1.0` prints its `Digest:`. To make the cluster
+The digests are in the release workflow run's summary. For the chart, `helm pull oci://ghcr.io/techdufus/charts/omp-operator --version 0.2.0` prints its `Digest:`. To make the cluster
 run exactly what you verified, set `image.digest` and `runtimeImage.digest`.
