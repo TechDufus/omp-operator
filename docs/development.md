@@ -196,5 +196,8 @@ git tag -s v0.3.0 -m v0.3.0
 git push --atomic origin main v0.3.0   # the catalog names the tag; push both at once
 ```
 
+Run `mise run ci` (and `mise run test-e2e` when the release changes the operator) before pushing.
 `mise run release:check` (part of `ci`) fails when the plugin's `package.json` version, its catalog `version` and
-`source.ref` disagree; `release.yml` runs it with the tag and refuses a tag that is not `v<plugin version>`.
+`source.ref` disagree; `release.yml` runs it with the tag and refuses a tag that is not `v<plugin version>`. Because
+`main` and the tag land together, `release.yml` then waits for `ci.yml` on the tagged commit and publishes nothing
+unless it passed.

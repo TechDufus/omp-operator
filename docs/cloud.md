@@ -199,8 +199,8 @@ old, so a release arrives within a day; to take it at once, run
 
 The extension (`clients/omp-cloud`) has no runtime npm dependencies. To work on it, link a checkout instead:
 `ln -s <repo>/clients/omp-cloud ~/.omp/agent/extensions/omp-cloud` (`mise run dev:client` does that for the dev
-cluster). Install one or the other, never both: each copy registers `/cloud`, only the first loaded is used and you
-cannot tell which. Switch with `omp plugin uninstall omp-cloud@omp-operator` or by removing the link. The extension
+cluster). Install one or the other, never both: each copy registers `/cloud`, omp runs only one of them without a
+warning, and nothing shows which. Switch with `omp plugin uninstall omp-cloud@omp-operator` or by removing the link. The extension
 never ships itself to the cloud.
 
 ## Configure the extension
