@@ -38,6 +38,8 @@ func TestExposedNamesAndLabels(t *testing.T) {
 	WebhookEventsTotal.WithLabelValues("ns", "t", "session").Inc()
 	ActionCallsTotal.WithLabelValues("ns", "a", "restart", "ok").Inc()
 	ModelAuthFailuresTotal.WithLabelValues("ns", "a").Inc()
+	ThreadTurnsTotal.WithLabelValues("ns", "a", "done").Inc()
+	ThreadsActive.WithLabelValues("ns", "a", "Working").Set(1)
 	NotificationsTotal.WithLabelValues("ntfy", ResultOK).Inc()
 	DataFreeBytes.Set(1)
 	DataCapacityBytes.Set(2)
@@ -52,6 +54,8 @@ func TestExposedNamesAndLabels(t *testing.T) {
 		"omp_operator_webhook_events_total":      "namespace result trigger",
 		"omp_operator_action_calls_total":        "action agent namespace result",
 		"omp_operator_model_auth_failures_total": "agent namespace",
+		"omp_operator_thread_turns_total":        "agent namespace state",
+		"omp_operator_threads":                   "agent namespace phase",
 		"omp_operator_notifications_total":       "result type",
 		"omp_operator_data_free_bytes":           "",
 		"omp_operator_data_capacity_bytes":       "",

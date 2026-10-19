@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 
 	"github.com/TechDufus/omp-operator/api/v1alpha1"
 )
@@ -32,6 +33,16 @@ func SessionTokenSecretName(session string) string { return session + "-token" }
 
 // ToolsyncTokenSecretName is the Secret holding an agent's toolsync API token (owned by the agent).
 func ToolsyncTokenSecretName(agent string) string { return agent + "-toolsync-token" }
+
+// ThreadSecretsName is the Secret holding a thread's shipped secret files and variables
+// (owned by the thread): keys ThreadSecretFileKey(i) and ThreadSecretEnvKey(name).
+func ThreadSecretsName(thread string) string { return thread + "-secrets" }
+
+// ThreadSecretFileKey is the key of spec.secretFiles[i] in the thread's secrets Secret.
+func ThreadSecretFileKey(i int) string { return "file-" + strconv.Itoa(i) }
+
+// ThreadSecretEnvKey is the key of the secret variable name in the thread's secrets Secret.
+func ThreadSecretEnvKey(name string) string { return "env." + name }
 
 // ErrUnknownTool is returned by an ActionRunner for a tool the agent does not have; the API
 // answers it with 404. The actions package aliases it as actions.ErrUnknownTool.

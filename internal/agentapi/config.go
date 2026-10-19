@@ -20,11 +20,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/TechDufus/omp-operator/api/v1alpha1"
+	"github.com/TechDufus/omp-operator/internal/agentspec"
+	"github.com/TechDufus/omp-operator/internal/cloudspec"
+	"github.com/TechDufus/omp-operator/internal/gateway"
 	"github.com/TechDufus/omp-operator/internal/prompt"
 )
 
@@ -38,13 +43,18 @@ const (
 // DefaultTools is tools.allow when unset: omp built-in tools the agent may use.
 var DefaultTools = []string{"read", "grep", "glob", "bash", "todo"}
 
-// sessionConfig builds the SessionConfig of a session.
-func (s *Server) sessionConfig(ctx context.Context, agent *v1alpha1.OmpAgent, sess *v1alpha1.OmpSession) (*SessionConfig, error) {
+// sessionConfig builds the SessionConfig of a session. thread is the OmpThread of a thread
+// sitting, nil for other sessions.
+func (s *Server) sessionConfig(ctx context.Context, agent *v1alpha1.OmpAgent, sess *v1alpha1.OmpSession, thread *v1alpha1.OmpThread) (*SessionConfig, error) {
 	defs, _, err := s.Runner.ToolDefs(ctx, agent)
 	if err != nil {
 		return nil, fmt.Errorf("tool definitions: %w", err)
 	}
 	spec := &agent.Spec
+	if thread != nil {
+		// finish ends a session; thread sittings end by idling, so they do not get it.
+		defs = slices.DeleteFunc(defs, func(d ToolDef) bool { return d.Name == FinishToolName })
+	}
 
 	creds := make([]prompt.Credential, 0, len(spec.Credentials))
 	for _, c := range spec.Credentials {
@@ -71,7 +81,71 @@ func (s *Server) sessionConfig(ctx context.Context, agent *v1alpha1.OmpAgent, se
 		Redact:         redactSources(spec, mcpRedact),
 		Continuity:     sess.Spec.ContinuityKey != "",
 	}
+	if thread != nil {
+		applyThread(cfg, agent, thread)
+	}
 	return cfg, nil
+}
+
+// applyThread adapts cfg to a sitting of thread: the thread's model and thinking level, the
+// cloud system prompt section, the shipped secrets to redact, and the turn-loop settings.
+func applyThread(cfg *SessionConfig, agent *v1alpha1.OmpAgent, thread *v1alpha1.OmpThread) {
+	spec := &agent.Spec
+	var cloud v1alpha1.CloudSpec
+	if spec.Cloud != nil {
+		cloud = *spec.Cloud
+	}
+	if m := thread.Spec.Model; m != "" {
+		cfg.Model.Default = m
+	}
+	if gw := cfg.Model.Gateway; gw != nil {
+		gw.Providers = providers(slices.Concat([]string{cfg.Model.Default, spec.Model.Small}, gateway.AllowedModels(agent))...)
+	}
+	cfg.Continuity = true
+
+	_, workspace := cloudspec.PodPaths(thread.Spec.Paths)
+	host, _, _ := cloudspec.MatchGitHost(cloud.Git, thread.Spec.Repo.RemoteURL)
+	push := host != nil && host.Push
+
+	cfg.SystemPrompt = joinSections(cfg.SystemPrompt, prompt.CloudSection(prompt.Cloud{
+		Repo:        thread.Spec.Repo.Name,
+		Workspace:   workspace,
+		Branch:      cloudspec.Branch(thread.Name),
+		LocalBranch: thread.Spec.Repo.LocalBranch,
+		Push:        push,
+		SecretFiles: thread.Spec.SecretFiles,
+	}))
+	for _, name := range thread.Spec.SecretEnv {
+		cfg.Redact = append(cfg.Redact, RedactSource{Name: "thread-env-" + name, Env: name})
+	}
+	for i, p := range thread.Spec.SecretFiles {
+		cfg.Redact = append(cfg.Redact, RedactSource{
+			Name: "thread-file-" + strconv.Itoa(i), File: path.Join(workspace, p), Lines: true,
+		})
+	}
+
+	cfg.Thread = &ThreadConfig{
+		Name:               thread.Name,
+		Branch:             cloudspec.Branch(thread.Name),
+		BaseCommit:         thread.Spec.Repo.BaseCommit,
+		RepoName:           thread.Spec.Repo.Name,
+		LocalBranch:        thread.Spec.Repo.LocalBranch,
+		Thinking:           thread.Spec.Thinking,
+		TurnTimeoutSeconds: cfg.TimeoutSeconds,
+		IdleTimeoutSeconds: int64(cloudspec.IdleTimeout(&cloud) / time.Second),
+		MaxSittingSeconds:  int64(cloudspec.MaxSitting(&cloud) / time.Second),
+		Push:               push,
+	}
+}
+
+func joinSections(parts ...string) string {
+	var out []string
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, "\n\n")
 }
 
 func sessionTimeout(spec *v1alpha1.OmpAgentSpec) time.Duration {
@@ -81,9 +155,14 @@ func sessionTimeout(spec *v1alpha1.OmpAgentSpec) time.Duration {
 	return DefaultSessionTimeout
 }
 
+// toolAllow is the omp built-in tools the session may use; nil means all of them
+// (tools.allow is exactly ["*"]), so no tool list is passed to omp.
 func toolAllow(spec *v1alpha1.OmpAgentSpec) []string {
-	if len(spec.Tools.Allow) == 0 {
+	switch {
+	case len(spec.Tools.Allow) == 0:
 		return slices.Clone(DefaultTools)
+	case len(spec.Tools.Allow) == 1 && spec.Tools.Allow[0] == agentspec.AllTools:
+		return nil
 	}
 	return slices.Clone(spec.Tools.Allow)
 }

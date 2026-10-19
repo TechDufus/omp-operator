@@ -85,7 +85,11 @@ func (s *Server) handleSessionPlan(w http.ResponseWriter, r *http.Request, req *
 	if agent == nil {
 		return
 	}
-	plan, err := s.sessionPlan(r.Context(), agent, req.session)
+	thread, ok := s.sessionThread(w, r, req)
+	if !ok {
+		return
+	}
+	plan, err := s.sessionPlan(r.Context(), agent, req.session, thread)
 	if err != nil {
 		s.planError(w, err)
 		return
@@ -98,7 +102,11 @@ func (s *Server) handleSessionConfig(w http.ResponseWriter, r *http.Request, req
 	if agent == nil {
 		return
 	}
-	cfg, err := s.sessionConfig(r.Context(), agent, req.session)
+	thread, ok := s.sessionThread(w, r, req)
+	if !ok {
+		return
+	}
+	cfg, err := s.sessionConfig(r.Context(), agent, req.session, thread)
 	if err != nil {
 		s.internalError(w, "build session config", err)
 		return
@@ -131,7 +139,7 @@ func (s *Server) handlePrepared(w http.ResponseWriter, r *http.Request, req *ses
 		s.internalError(w, "update session status", err)
 		return
 	}
-	if agent.Spec.Toolchain != nil {
+	if agent.Spec.Toolchain != nil && req.session.Spec.ThreadRef == nil {
 		agentKey := types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}
 		if err := s.updateAgentStatus(ctx, agentKey, func(a *v1alpha1.OmpAgent) bool {
 			if a.Spec.Toolchain == nil || a.Status.Toolchain.Hash == p.ToolchainHash || a.Status.Toolchain.Stale {

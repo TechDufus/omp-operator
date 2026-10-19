@@ -33,6 +33,7 @@ import (
 
 	ompv1alpha1 "github.com/TechDufus/omp-operator/api/v1alpha1"
 	"github.com/TechDufus/omp-operator/internal/config"
+	"github.com/TechDufus/omp-operator/internal/threads"
 )
 
 // Dispatcher resolves an agent's notify sinks from the cluster and delivers
@@ -130,6 +131,52 @@ func (d *Dispatcher) sessionMessage(agent *ompv1alpha1.OmpAgent, s *ompv1alpha1.
 		m.Actions = append(m.Actions, ActionRecord{Action: a.Action, Target: a.Target, OK: a.OK, At: a.At.Time, Result: a.Result})
 	}
 	return m
+}
+
+// maxTurnSummaryChars bounds the reply excerpt a turn notification carries.
+const maxTurnSummaryChars = 800
+
+// TurnDone notifies the agent's sinks whose `on` includes the turn's result about a finished
+// thread turn. The result is "failed" for a failed turn, "fixed" when the turn changed files
+// and "ok" otherwise. Sinks are independent: a failing sink never keeps the others from being
+// tried, and every failure is returned, joined.
+func (d *Dispatcher) TurnDone(ctx context.Context, agent *ompv1alpha1.OmpAgent, thread *ompv1alpha1.OmpThread, turn threads.Turn) error {
+	verdict := string(ompv1alpha1.NotifyOnOK)
+	switch {
+	case turn.State == ompv1alpha1.TurnStateFailed:
+		verdict = string(ompv1alpha1.NotifyOnFailed)
+	case turn.FilesChanged > 0:
+		verdict = string(ompv1alpha1.NotifyOnFixed)
+	}
+	sinks := slices.DeleteFunc(slices.Clone(agent.Spec.Notify), func(n ompv1alpha1.NotifySink) bool {
+		return !sinkWants(n, verdict)
+	})
+	if len(sinks) == 0 {
+		return nil
+	}
+	return d.deliver(ctx, agent.Namespace, sinks, d.turnMessage(agent, thread, turn, verdict))
+}
+
+func (d *Dispatcher) turnMessage(agent *ompv1alpha1.OmpAgent, thread *ompv1alpha1.OmpThread, turn threads.Turn, verdict string) Message {
+	what := turn.Title
+	if what == "" {
+		what = fmt.Sprintf("turn %d", turn.ID)
+	}
+	summary := turn.Reply
+	if turn.State == ompv1alpha1.TurnStateFailed || summary == "" {
+		summary = turn.Error
+	}
+	if r := []rune(summary); len(r) > maxTurnSummaryChars {
+		summary = string(r[:maxTurnSummaryChars])
+	}
+	return Message{
+		Session: thread.Namespace + "/" + thread.Name,
+		Agent:   agent.Name,
+		Verdict: verdict,
+		Title:   thread.Spec.Title + ": " + what,
+		Summary: summary,
+		URL:     d.link("/threads/" + thread.Namespace + "/" + thread.Name),
+	}
 }
 
 // Notice sends a notice to every sink of the agent at most once per `every` for

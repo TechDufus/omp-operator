@@ -212,6 +212,8 @@ func (r *OmpSessionReconciler) ensureMetadata(ctx context.Context, s *ompv1alpha
 	}
 	kind := ompv1alpha1.SessionKindManual
 	switch {
+	case s.Spec.ThreadRef != nil:
+		kind = ompv1alpha1.SessionKindCloud
 	case s.Spec.Event != nil:
 		kind = ompv1alpha1.SessionKindWebhook
 	case s.Spec.TriggerRef != nil:
@@ -219,6 +221,9 @@ func (r *OmpSessionReconciler) ensureMetadata(ctx context.Context, s *ompv1alpha
 	}
 	setLabel(ompv1alpha1.LabelAgent, s.Spec.AgentRef.Name)
 	setLabel(ompv1alpha1.LabelKind, string(kind))
+	if s.Spec.ThreadRef != nil {
+		setLabel(ompv1alpha1.LabelThread, s.Spec.ThreadRef.Name)
+	}
 	if s.Spec.TriggerRef != nil {
 		setLabel(ompv1alpha1.LabelTrigger, s.Spec.TriggerRef.Name)
 	}
@@ -244,6 +249,17 @@ func (r *OmpSessionReconciler) ensureMetadata(ctx context.Context, s *ompv1alpha
 	} else if !apierrors.IsNotFound(err) {
 		return err
 	}
+	if t := s.Spec.ThreadRef; t != nil {
+		thread := &ompv1alpha1.OmpThread{}
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: t.Name}, thread); err == nil {
+			// The thread reconciler's sittings already carry it as their controller.
+			if err := owner(thread); err != nil {
+				return err
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
 	if t := s.Spec.TriggerRef; t != nil {
 		trig := &ompv1alpha1.OmpTrigger{}
 		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: t.Name}, trig); err == nil {
@@ -268,7 +284,8 @@ func equalMeta(a, b *ompv1alpha1.OmpSession) bool {
 }
 
 // finalize removes the session's stored files, and the continuity tarball when no other
-// session of the agent holds the same continuity label.
+// session of the agent holds the same continuity label. The sittings of a thread share the
+// thread's tarball, which the thread's own finalizer removes.
 func (r *OmpSessionReconciler) finalize(ctx context.Context, s *ompv1alpha1.OmpSession) error {
 	if !controllerutil.ContainsFinalizer(s, ompv1alpha1.FinalizerCleanup) {
 		return nil
@@ -277,7 +294,7 @@ func (r *OmpSessionReconciler) finalize(ctx context.Context, s *ompv1alpha1.OmpS
 		if err := r.Store.RemoveSession(string(s.UID)); err != nil {
 			return fmt.Errorf("remove session data: %w", err)
 		}
-		if id := s.Labels[ompv1alpha1.LabelContinuity]; id != "" {
+		if id := s.Labels[ompv1alpha1.LabelContinuity]; id != "" && s.Spec.ThreadRef == nil {
 			shared, err := r.continuityShared(ctx, s, id)
 			if err != nil {
 				return err
@@ -350,6 +367,9 @@ func (r *OmpSessionReconciler) reconcileTerminal(ctx context.Context, s *ompv1al
 func (r *OmpSessionReconciler) notifyDone(ctx context.Context, s *ompv1alpha1.OmpSession, agent *ompv1alpha1.OmpAgent) error {
 	cond := metav1.Condition{Type: ompv1alpha1.ConditionNotified, Status: metav1.ConditionTrue, Reason: "Notified"}
 	switch {
+	case s.Spec.ThreadRef != nil:
+		// The sittings of a thread report per turn, through the thread reconciler.
+		cond.Reason, cond.Message = "ThreadTurns", "turns are notified by the thread"
 	case agent == nil:
 		cond.Status, cond.Reason, cond.Message = metav1.ConditionFalse, "AgentNotFound", "the agent no longer exists"
 	case r.Notifier == nil:
@@ -388,6 +408,8 @@ func (r *OmpSessionReconciler) finish(ctx context.Context, s *ompv1alpha1.OmpSes
 	verdict := string(s.Status.Verdict)
 	if phase == ompv1alpha1.SessionPhaseFailed {
 		verdict = "failed"
+	} else if verdict == "" {
+		verdict = string(ompv1alpha1.NotifyOnOK) // a thread sitting has no verdict
 	}
 	kind := s.Labels[ompv1alpha1.LabelKind]
 	trigger := ""
@@ -448,17 +470,20 @@ func (r *OmpSessionReconciler) reconcilePending(ctx context.Context, s *ompv1alp
 		}
 	}
 
-	// 4. one session per agent, in queue order
+	// 4. the agent's concurrency limit, in queue order; a toolsync pod and the thread's own
+	// running sitting hold the session back
 	sessions, pods, err := r.agentWork(ctx, s.Namespace, agent.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if slices.ContainsFunc(sessions, func(o ompv1alpha1.OmpSession) bool {
-		return o.UID != s.UID && o.Status.Phase == ompv1alpha1.SessionPhaseRunning
-	}) || slices.ContainsFunc(pods, func(p corev1.Pod) bool { return !podFinished(&p) }) {
+	if slices.ContainsFunc(pods, func(p corev1.Pod) bool {
+		return p.Labels[ompv1alpha1.LabelRole] == string(ompv1alpha1.PodRoleToolsync) && !podFinished(&p)
+	}) || slices.ContainsFunc(sessions, func(o ompv1alpha1.OmpSession) bool {
+		return o.UID != s.UID && o.Status.Phase == ompv1alpha1.SessionPhaseRunning && sameThread(&o, s)
+	}) {
 		return ctrl.Result{RequeueAfter: durOr(r.QueueRequeue, defaultQueueRequeue)}, nil
 	}
-	if !r.isFirstInQueue(s, sessions, now) {
+	if !r.mayStart(s, agent, sessions, now) {
 		return ctrl.Result{RequeueAfter: durOr(r.QueueRequeue, defaultQueueRequeue)}, nil
 	}
 
@@ -467,9 +492,11 @@ func (r *OmpSessionReconciler) reconcilePending(ctx context.Context, s *ompv1alp
 		return res, err
 	}
 
-	// 6. toolchain
-	if res, done, err := r.toolchainGate(ctx, agent, pods); done || err != nil {
-		return res, err
+	// 6. toolchain (a thread sitting caches its repository's toolchain instead)
+	if s.Spec.ThreadRef == nil {
+		if res, done, err := r.toolchainGate(ctx, agent, pods); done || err != nil {
+			return res, err
+		}
 	}
 
 	return r.start(ctx, s, agent)
@@ -509,22 +536,50 @@ func sessionPriority(s *ompv1alpha1.OmpSession) int32 {
 	return 1
 }
 
-// isFirstInQueue reports whether s heads the agent's queue of Pending sessions: lowest
-// priority number, then oldest. Sessions waiting for a future retryAt do not hold the queue.
-func (r *OmpSessionReconciler) isFirstInQueue(s *ompv1alpha1.OmpSession, sessions []ompv1alpha1.OmpSession, now time.Time) bool {
+// maxConcurrent is how many of the agent's sessions may run at once.
+func maxConcurrent(agent *ompv1alpha1.OmpAgent) int {
+	return max(1, int(agent.Spec.Limits.MaxConcurrentSessions))
+}
+
+// sameThread reports whether a and b are sittings of one thread.
+func sameThread(a, b *ompv1alpha1.OmpSession) bool {
+	return a.Spec.ThreadRef != nil && b.Spec.ThreadRef != nil && a.Spec.ThreadRef.Name == b.Spec.ThreadRef.Name
+}
+
+// mayStart applies the agent's concurrency limit to Pending session s. Sessions of one thread
+// never run together, and the agent runs at most limits.maxConcurrentSessions sessions at
+// once. The Pending sessions that could start now (retryAt passed, no Running session in their
+// thread) are ranked by priority number, then age, then name; s starts only when its rank is
+// below the number of free slots.
+func (r *OmpSessionReconciler) mayStart(s *ompv1alpha1.OmpSession, agent *ompv1alpha1.OmpAgent, sessions []ompv1alpha1.OmpSession, now time.Time) bool {
+	running := 0
+	for i := range sessions {
+		if o := &sessions[i]; o.UID != s.UID && o.Status.Phase == ompv1alpha1.SessionPhaseRunning {
+			running++
+		}
+	}
+	free := maxConcurrent(agent) - running
+	if free <= 0 {
+		return false
+	}
 	queue := slices.DeleteFunc(slices.Clone(sessions), func(o ompv1alpha1.OmpSession) bool {
+		if o.UID == s.UID {
+			return false
+		}
 		if !o.DeletionTimestamp.IsZero() {
 			return true
 		}
 		if o.Status.Phase != "" && o.Status.Phase != ompv1alpha1.SessionPhasePending {
 			return true
 		}
-		return o.UID != s.UID && o.Status.RetryAt != nil && o.Status.RetryAt.After(now)
+		if o.Status.RetryAt != nil && o.Status.RetryAt.After(now) {
+			return true
+		}
+		return slices.ContainsFunc(sessions, func(p ompv1alpha1.OmpSession) bool {
+			return p.Status.Phase == ompv1alpha1.SessionPhaseRunning && sameThread(&p, &o)
+		})
 	})
-	if len(queue) == 0 {
-		return true
-	}
-	head := slices.MinFunc(queue, func(a, b ompv1alpha1.OmpSession) int {
+	slices.SortFunc(queue, func(a, b ompv1alpha1.OmpSession) int {
 		if pa, pb := sessionPriority(&a), sessionPriority(&b); pa != pb {
 			return int(pa - pb)
 		}
@@ -533,7 +588,8 @@ func (r *OmpSessionReconciler) isFirstInQueue(s *ompv1alpha1.OmpSession, session
 		}
 		return strings.Compare(a.Name, b.Name)
 	})
-	return head.UID == s.UID
+	rank := slices.IndexFunc(queue, func(o ompv1alpha1.OmpSession) bool { return o.UID == s.UID })
+	return rank >= 0 && rank < free
 }
 
 var fluxSourceGV = schema.GroupVersion{Group: "source.toolkit.fluxcd.io", Version: "v1"}
@@ -542,8 +598,8 @@ var fluxSourceGV = schema.GroupVersion{Group: "source.toolkit.fluxcd.io", Versio
 // true when the session must not proceed this round.
 func (r *OmpSessionReconciler) workspaceGate(ctx context.Context, s *ompv1alpha1.OmpSession, agent *ompv1alpha1.OmpAgent) (ctrl.Result, bool, error) {
 	var refs []ompv1alpha1.FluxSourceRef
-	if ws := agent.Spec.Workspace; ws != nil && ws.FluxSource != nil {
-		refs = append(refs, *ws.FluxSource)
+	if ws := agent.Spec.Workspace; ws != nil && ws.FluxSource != nil && s.Spec.ThreadRef == nil {
+		refs = append(refs, *ws.FluxSource) // a thread sitting does not use the agent workspace
 	}
 	for _, sk := range agent.Spec.Skills {
 		if sk.FluxSource != nil {
@@ -765,7 +821,17 @@ func (r *OmpSessionReconciler) start(ctx context.Context, s *ompv1alpha1.OmpSess
 	if err := r.ensureTokenSecret(ctx, s.Namespace, agentapi.SessionTokenSecretName(s.Name), agent.Name, s); err != nil {
 		return ctrl.Result{}, err
 	}
-	pod := podspec.SessionPod(agent, s, r.Options, s.Status.Attempts+1)
+	var thread *ompv1alpha1.OmpThread
+	if ref := s.Spec.ThreadRef; ref != nil {
+		thread = &ompv1alpha1.OmpThread{}
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: ref.Name}, thread); err != nil {
+			if apierrors.IsNotFound(err) {
+				return r.finish(ctx, s, agent, ompv1alpha1.SessionPhaseFailed, "thread not found", true)
+			}
+			return ctrl.Result{}, err
+		}
+	}
+	pod := podspec.SessionPod(agent, s, thread, r.Options, s.Status.Attempts+1)
 	if err := controllerutil.SetControllerReference(s, pod, r.scheme()); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -838,6 +904,9 @@ func (r *OmpSessionReconciler) attemptEnded(ctx context.Context, s *ompv1alpha1.
 	}
 
 	switch {
+	case s.Spec.ThreadRef != nil && s.Status.Outcome == ompv1alpha1.OutcomeCompleted:
+		// A sitting ends by idling out, without a verdict; its turns carry the results.
+		return r.finish(ctx, s, agent, ompv1alpha1.SessionPhaseSucceeded, "", false)
 	case s.Status.Verdict != "":
 		return r.finish(ctx, s, agent, ompv1alpha1.SessionPhaseSucceeded, "", false)
 	case s.Status.Outcome == ompv1alpha1.OutcomeCompleted:

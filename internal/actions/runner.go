@@ -185,6 +185,9 @@ type callCtx struct {
 // omp_operator_action_calls_total.
 func (r *Runner) Call(ctx context.Context, agent *v1alpha1.OmpAgent, s *v1alpha1.OmpSession, tool string, args json.RawMessage) (agentapi.ActionResult, error) {
 	if tool == FinishTool {
+		if s.Spec.ThreadRef != nil {
+			return agentapi.ActionResult{Text: "finish is not available in cloud threads", IsError: true}, nil
+		}
 		return r.finish(ctx, agent, s, args)
 	}
 	act, err := r.findAction(ctx, agent, tool)

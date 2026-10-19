@@ -32,6 +32,7 @@ import (
 
 	ompv1alpha1 "github.com/TechDufus/omp-operator/api/v1alpha1"
 	"github.com/TechDufus/omp-operator/internal/config"
+	"github.com/TechDufus/omp-operator/internal/threads"
 )
 
 const (
@@ -312,5 +313,65 @@ func TestNoticeWithoutSinksClaimsNothing(t *testing.T) {
 	}
 	if err := e.c.Get(t.Context(), types.NamespacedName{Namespace: dispatchNS, Name: dispatchAgent}, &cur); err != nil || len(cur.Status.Notices) != 0 {
 		t.Fatalf("notices = %v err=%v", cur.Status.Notices, err)
+	}
+}
+
+func dispatchThread() *ompv1alpha1.OmpThread {
+	return &ompv1alpha1.OmpThread{
+		ObjectMeta: metav1.ObjectMeta{Namespace: dispatchNS, Name: "argus-k3x9fa"},
+		Spec: ompv1alpha1.OmpThreadSpec{
+			AgentRef: ompv1alpha1.LocalObjectRef{Name: dispatchAgent},
+			Title:    "fix the flake",
+		},
+	}
+}
+
+func TestTurnDoneFiltersSinksByResult(t *testing.T) {
+	tests := []struct {
+		name                   string
+		turn                   threads.Turn
+		slack, discord, webhok int
+	}{
+		{"done without changes is ok", threads.Turn{ID: 1, State: ompv1alpha1.TurnStateDone}, 0, 1, 1},
+		{"done with changes is fixed", threads.Turn{ID: 1, State: ompv1alpha1.TurnStateDone, FilesChanged: 3}, 0, 1, 1},
+		{"failed", threads.Turn{ID: 1, State: ompv1alpha1.TurnStateFailed, Error: "boom"}, 1, 1, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newDispatchEnv(t)
+			if err := e.d.TurnDone(t.Context(), e.agent, dispatchThread(), tt.turn); err != nil {
+				t.Fatal(err)
+			}
+			s, d, w := e.counts()
+			if s != tt.slack || d != tt.discord || w != tt.webhok {
+				t.Errorf("slack/discord/webhook = %d/%d/%d, want %d/%d/%d", s, d, w, tt.slack, tt.discord, tt.webhok)
+			}
+		})
+	}
+}
+
+func TestTurnDoneMessage(t *testing.T) {
+	e := newDispatchEnv(t)
+	reply := strings.Repeat("r", 900)
+	turn := threads.Turn{ID: 2, State: ompv1alpha1.TurnStateDone, FilesChanged: 1, Title: "Added Greet", Reply: reply}
+	if err := e.d.TurnDone(t.Context(), e.agent, dispatchThread(), turn); err != nil {
+		t.Fatal(err)
+	}
+	body := decode(t, e.webhook.bodies[0])
+	if body["session"] != "prod/argus-k3x9fa" || body["agent"] != dispatchAgent || body["verdict"] != dispatchFixed ||
+		body["title"] != "fix the flake: Added Greet" || body["summary"] != reply[:800] ||
+		body["url"] != "https://omp.example.com/threads/prod/argus-k3x9fa" {
+		t.Errorf("payload = %v", body)
+	}
+
+	// Without a title the turn number names it; a failed turn reports its error.
+	e = newDispatchEnv(t)
+	turn = threads.Turn{ID: 3, State: ompv1alpha1.TurnStateFailed, Reply: "partial", Error: "stopped by token:dev"}
+	if err := e.d.TurnDone(t.Context(), e.agent, dispatchThread(), turn); err != nil {
+		t.Fatal(err)
+	}
+	raw := string(e.slack.bodies[0])
+	if !strings.Contains(raw, "fix the flake: turn 3") || !strings.Contains(raw, "stopped by token:dev") {
+		t.Errorf("slack payload = %s", raw)
 	}
 }

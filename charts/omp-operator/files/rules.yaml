@@ -34,6 +34,7 @@
     - ompactions
     - ompagents
     - ompsessions
+    - ompthreads
     - omptriggers
   verbs:
     - create
@@ -49,6 +50,7 @@
     - ompactions/finalizers
     - ompagents/finalizers
     - ompsessions/finalizers
+    - ompthreads/finalizers
     - omptriggers/finalizers
   verbs:
     - update
@@ -58,6 +60,7 @@
     - ompactions/status
     - ompagents/status
     - ompsessions/status
+    - ompthreads/status
     - omptriggers/status
   verbs:
     - get

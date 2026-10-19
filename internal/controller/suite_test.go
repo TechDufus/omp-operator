@@ -55,6 +55,7 @@ import (
 	"github.com/TechDufus/omp-operator/internal/gateway"
 	"github.com/TechDufus/omp-operator/internal/notify"
 	"github.com/TechDufus/omp-operator/internal/store"
+	"github.com/TechDufus/omp-operator/internal/threads"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -74,7 +75,7 @@ const (
 // works in its own, so agents of different groups never meet.
 var etNamespaces = []string{
 	"et-actions", "et-agents", "et-triggers", "et-pods", "et-lifecycle", "et-queue",
-	"et-gate", "et-toolchain", "et-cleanup", "et-flux", "et-samples", "et-clients",
+	"et-gate", "et-toolchain", "et-cleanup", "et-flux", "et-samples", "et-clients", "et-threads",
 }
 
 var (
@@ -92,6 +93,7 @@ var (
 	etSink    *etSinkServer
 	etGateway *gateway.Manager
 	etAPI     *httptest.Server
+	etThreads *threads.Log
 	etDone    = make(chan struct{})
 )
 
@@ -213,6 +215,8 @@ var _ = BeforeSuite(func() {
 	gw := &gateway.Manager{Client: c, APIReader: apiReader, Options: etOpts, Now: etClock.Now}
 	etGateway = gw
 	runner := &actions.Runner{Client: c, APIReader: apiReader, Store: etStore, Options: etOpts, Now: etClock.Now}
+	etThreads = threads.NewLog(etStore)
+	etThreads.Now = etClock.Now
 
 	Expect((&OmpActionReconciler{Client: c, Scheme: mgr.GetScheme(), Options: etOpts}).SetupWithManager(mgr)).To(Succeed())
 	Expect((&OmpAgentReconciler{
@@ -229,6 +233,11 @@ var _ = BeforeSuite(func() {
 		QueueRequeue:     200 * time.Millisecond,
 		ToolchainRequeue: 200 * time.Millisecond,
 	}).SetupWithManager(mgr)).To(Succeed())
+	Expect((&OmpThreadReconciler{
+		Client: c, Scheme: mgr.GetScheme(), APIReader: apiReader, Options: etOpts, Store: etStore,
+		Threads: etThreads, Notifier: dispatcher, Now: etClock.Now,
+		WorkingRequeue: 500 * time.Millisecond, IdleRecheck: 500 * time.Millisecond,
+	}).SetupWithManager(mgr)).To(Succeed())
 
 	Expect(mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		if err := gw.EnsureClientsSecret(ctx); err != nil {
@@ -240,6 +249,7 @@ var _ = BeforeSuite(func() {
 
 	apiServer := &agentapi.Server{
 		Client: c, APIReader: apiReader, Store: etStore, Options: etOpts, Runner: runner, Now: etClock.Now,
+		Threads: etThreads,
 	}
 	etAPI = httptest.NewServer(apiServer.Handler())
 

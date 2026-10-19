@@ -17,7 +17,7 @@ For background see [concepts](../concepts.md), [sessions](../sessions.md) and [m
 | `serviceAccountName` | string | unset | Set: pods run as it with its token mounted, `KUBECONFIG` set. Unset: the namespace's `default` account, no token |
 | `model` | [ModelSpec](#model) | required | |
 | `instructions` | string | | Appended to omp's system prompt |
-| `tools.allow` | []string | `[read, grep, glob, bash, todo]` | omp built-in tools the agent may use. Empty passes `--no-tools` |
+| `tools.allow` | []string | `[read, grep, glob, bash, todo]` | omp built-in tools the agent may use. Empty passes `--no-tools`. Exactly `["*"]` means every built-in tool (no tool list is passed); `*` cannot be combined with other entries |
 | `skills` | [][SkillSource](#skills) | | At most 32. Copied in order |
 | `workspace` | [WorkspaceSpec](#workspace) | empty directory | |
 | `credentials` | [][Credential](#credentials) | | At most 64 |
@@ -26,6 +26,7 @@ For background see [concepts](../concepts.md), [sessions](../sessions.md) and [m
 | `toolchain` | `{disable: []string}` | unset (off) | Serve the workspace's `mise` tools from the operator. `disable` lists mise tool short names to skip. `toolchain: {}` turns it on |
 | `limits` | [LimitsSpec](#limits) | `{}` | |
 | `notify` | [][NotifySink](#notify) | | At most 16 |
+| `cloud` | [CloudSpec](#cloud) | unset | Enables cloud threads |
 | `sessionRetention` | duration | `720h` | How long a finished session is kept |
 | `pod` | [PodOverrides](#pod) | | Merged into the main container of session pods |
 
@@ -113,6 +114,7 @@ omp through `OMP_MCP_<n>_<m>` environment variables of the main container and ar
 | `maxAttempts` | `4` | Attempts before a retryable session fails. Minimum 1 |
 | `retryDelay` | `15m` | Wait before a retry |
 | `eventSessionsPerDay` | `12` | Webhook-created sessions of this agent in a rolling 24 hours. Minimum 1 |
+| `maxConcurrentSessions` | `1` | Sessions of this agent that run at the same time. 1 to 20. Pending sessions start in order of priority number, then age, as slots free up. A toolsync pod holds every start. Sittings of one cloud thread never run together |
 | `nonCriticalSessionsPerDay` | `8` | The part of those whose severity is not `critical`. Minimum 1 |
 
 ### notify
@@ -127,6 +129,43 @@ omp through `OMP_MCP_<n>_<m>` environment variables of the main container and ar
 | `webhook` | `urlSecretRef`, `hmacSecretRef` (optional, signs the body into `X-Omp-Signature-256`) |
 
 See [notifications](../notifications.md).
+
+### cloud
+
+Setting `cloud` makes the agent a cloud agent: the cloud API can create [OmpThreads](ompthread.md) on it.
+The agent name is then at most 50 characters. Cloud sittings are ordinary `OmpSession`s with `kind=cloud`;
+they run the agent's image, model, credentials, MCP servers, skills and `limits`, but not its `workspace`
+(the repository comes from the thread) and not its stored `toolchain` (see below).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `idleTimeout` | duration | `10m` | How long a sitting waits for the next message before it saves its state and exits. 1m to 24h |
+| `maxSitting` | duration | `4h` | A sitting takes no turn that could end past this; the next message starts a new pod. The pod deadline is this plus 10 minutes. 10m to 24h |
+| `threadRetention` | duration | `168h` | An Idle thread is deleted this long after its last activity. At least 1h |
+| `git` | [][CloudGitHost](#cloudgit) | | At most 16 |
+
+#### cloud.git
+
+| Field | Description |
+|---|---|
+| `host` | Lowercase host name only, for example `github.com`. Unique in the list |
+| `auth` | [GitAuth](#gitauth). Used to fetch the thread's base commit from a remote on this host |
+| `push` | Push `omp-cloud/<thread>` to the thread's remote after every turn |
+
+A thread's remote URL (scp-like `user@host:path`, `ssh://` or `http(s)://`) selects the entry by host. With token
+auth the operator fetches `https://<host>/<path>` (or the `http(s)` scheme and port as written); with SSH auth it
+fetches `ssh://git@<host>/<path>`. A remote on no listed host is fetched anonymously when it is an `http(s)` URL and
+cannot be fetched otherwise, so the handoff must carry the whole history.
+
+Credentials never reach the agent container. Only the `prepare` init container (which fetches) and, with `push`,
+the `gitpush` sidecar mount `auth`; the sidecar pushes a branch and remote fixed by its own environment when the
+agent container asks on `127.0.0.1:8090`.
+
+A cloud sitting's pod mirrors the user's paths: home and workspace are mounted where they are on the user's
+machine (or at `/home/agent` and `/workspace` when those paths cannot be mirrored). Its volumes are larger than a
+plain session's: workspace 20Gi, home 10Gi, mise 10Gi, tmp 5Gi. A sitting restores the repository, the shipped
+secrets, the user's omp setup and the conversation, caches the repository's `mise` toolchain per agent (the newest
+8), and has no `finish` tool: it idles after its last turn.
 
 ### pod
 
@@ -149,9 +188,10 @@ See [notifications](../notifications.md).
 | `notices` | When each rate-limited notice (`auth`, `cap:...`, `toolchain`, `workspace`) was last sent |
 
 `Ready` is true when: the namespace is served; an image is resolvable; every union holds; every referenced Secret,
-ConfigMap and Flux source exists; every listed action exists and is Ready; a gateway agent has a token
-(`tokenSecretRef`, or managed tokens enabled); credential and MCP names are unique and
-credentials follow the reserved-name rules. Reasons: `NamespaceNotAllowed`, `NoImage`, `InvalidSpec`, `MissingSecret`,
+ConfigMap and Flux source (including the Secrets of `cloud.git[].auth`) exists; every listed action exists and is
+Ready; a gateway agent has a token (`tokenSecretRef`, or managed tokens enabled); credential and MCP names are
+unique and credentials follow the reserved-name rules; `tools.allow` combines `*` with no other entry; and the
+`cloud` settings are in range. Reasons: `NamespaceNotAllowed`, `NoImage`, `InvalidSpec`, `MissingSecret`,
 `MissingConfigMap`, `MissingSource`, `ActionNotReady`, `NoGatewayToken`, `DuplicateName`, `InvalidCredential`.
 Re-checked every 5 minutes.
 

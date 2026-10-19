@@ -136,3 +136,20 @@ func TestFinishDefinition(t *testing.T) {
 		t.Fatalf("schema = %v", s)
 	}
 }
+
+func TestFinishIsRefusedInThreadSittings(t *testing.T) {
+	sess := newSession(testSession)
+	sess.Spec.ThreadRef = &v1alpha1.LocalObjectRef{Name: "coder-k3x9fa"}
+	r, c := newRunner(t, nil, sess)
+
+	res, err := r.Call(t.Context(), newAgent(), sess, FinishTool, mustMarshal(t, finishPayload()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || res.Text != "finish is not available in cloud threads" {
+		t.Fatalf("result = %+v", res)
+	}
+	if s := getSession(t, c); s.Status.Verdict != "" || len(s.Status.Actions) != 0 {
+		t.Fatalf("a refused finish recorded something: %+v", s.Status)
+	}
+}

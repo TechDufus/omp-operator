@@ -97,6 +97,21 @@ var (
 		Help:      "Session attempts that failed because model authentication was rejected.",
 	}, []string{lNamespace, lAgent})
 
+	// ThreadTurnsTotal counts finished thread turns once each, as their notification is
+	// recorded: namespace, agent, state (done|failed|cancelled).
+	ThreadTurnsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "thread_turns_total",
+		Help:      "Finished cloud thread turns by state.",
+	}, []string{lNamespace, lAgent, "state"})
+
+	// ThreadsActive is the current number of threads per phase: namespace, agent, phase (Working|Idle).
+	ThreadsActive = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "threads",
+		Help:      "Cloud threads in each phase.",
+	}, []string{lNamespace, lAgent, "phase"})
+
 	// NotificationsTotal counts notification deliveries: type (ntfy|slack|discord|webhook),
 	// result (ResultOK|ResultError).
 	NotificationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -142,6 +157,8 @@ func Register() {
 			TriggerGroupsActive,
 			WebhookEventsTotal,
 			ActionCallsTotal,
+			ThreadTurnsTotal,
+			ThreadsActive,
 			ModelAuthFailuresTotal,
 			NotificationsTotal,
 			DataFreeBytes,

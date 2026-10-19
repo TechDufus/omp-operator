@@ -145,6 +145,7 @@ func TestSessionPod(t *testing.T) { //nolint:gocyclo // table of assertions
 						"OMP_OPERATOR_API":            "http://omp-operator.omp-system.svc:8083",
 						"OMP_OPERATOR_WORKSPACE":      "/workspace",
 						"HOME":                        "/home/agent",
+						"PATH":                        "/opt/mise/data/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 						"MISE_DATA_DIR":               "/opt/mise/data",
 						"MISE_CACHE_DIR":              "/tmp/mise-cache",
 						"MISE_STATE_DIR":              "/tmp/mise-state",
@@ -446,7 +447,7 @@ func TestSessionPod(t *testing.T) { //nolint:gocyclo // table of assertions
 		t.Run(tt.name, func(t *testing.T) {
 			opts := *testOpts
 			opts.GatewayClientsSecret = "clients"
-			tt.check(t, SessionPod(tt.agent(), baseSession(), &opts, 1))
+			tt.check(t, SessionPod(tt.agent(), baseSession(), nil, &opts, 1))
 		})
 	}
 }
@@ -454,7 +455,7 @@ func TestSessionPod(t *testing.T) { //nolint:gocyclo // table of assertions
 func TestSessionPodNameAndLongLabel(t *testing.T) {
 	s := baseSession()
 	s.Name = strings.Repeat("a", 60) + "-bbbbbbbbb"
-	p := SessionPod(baseAgent(), s, testOpts, 3)
+	p := SessionPod(baseAgent(), s, nil, testOpts, 3)
 	if p.Name != s.Name+"-3" {
 		t.Errorf("name = %s", p.Name)
 	}

@@ -29,18 +29,23 @@ A session is `Pending` until all of these hold, checked in this order:
    fails with `agent not ready: <reason>`.
 3. For an agent with a [managed gateway token](model-access.md#point-an-agent-at-it), the running operator
    has not written the gateway clients Secret within the last 2 minutes.
-4. The agent has no other `Running` session and no unfinished session or toolsync pod.
-5. The session heads the agent's queue: the lowest `priority` number first, then the oldest. A session
-   waiting for its `retryAt` does not hold the queue. Otherwise it rechecks every 10 seconds.
+4. No toolsync pod of the agent is unfinished, and no other session of the same cloud thread is `Running`.
+5. The agent has a free slot: it has fewer than `limits.maxConcurrentSessions` `Running` sessions, and the
+   session ranks within the free slots among the Pending sessions that could start now: the lowest `priority`
+   number first, then the oldest. A session waiting for its `retryAt` does not take a slot. Otherwise it
+   rechecks every 10 seconds.
 6. A [Flux workspace](#workspace) has an artifact (otherwise `WorkspaceReady=False`, retried every 60
-   seconds, failing after 30 minutes).
-7. A needed [toolchain sync](#toolchain) has been attempted.
+   seconds, failing after 30 minutes). A cloud sitting skips the agent's workspace, but still waits for Flux
+   skill sources.
+7. A needed [toolchain sync](#toolchain) has been attempted (a cloud sitting skips it).
 
 Then the operator creates the token Secret `<session>-token` (32 random bytes, hex, owned by the session,
 reused across attempts) and pod `<session>-<attempt>`, and the session becomes `Running`, with
 `status.attempts` incremented and `startTime` and `podName` set.
 
-**One session runs at a time per agent.** For more parallelism, define more agents.
+**The agent runs `limits.maxConcurrentSessions` sessions at a time** (default 1, at most 20); the free slots go
+to the first Pending sessions in queue order. The sittings of one cloud thread never run together. For more
+parallelism than that, define more agents.
 
 Priorities run from 0 to 3, lower first. Defaults: manual sessions 1, critical webhook events 1, other
 webhook events 2, schedules 3.
@@ -67,9 +72,11 @@ credentials, MCP secrets, the gateway token and the `KUBECONFIG`. Details and th
 [security](security.md#session-pods).
 
 Environment in both containers: `OMP_OPERATOR_SESSION=<ns>/<name>`, `OMP_OPERATOR_API`,
-`OMP_OPERATOR_WORKSPACE=/workspace`, `HOME=/home/agent`, and mise settings that turn automatic installs
+`OMP_OPERATOR_WORKSPACE=/workspace`, `HOME=/home/agent`, `PATH` with `/opt/mise/data/shims` first (so the
+tools a [toolchain](#toolchain) provides resolve), and mise settings that turn automatic installs
 off (`MISE_AUTO_INSTALL=false` and friends, `MISE_TRUSTED_CONFIG_PATHS=/workspace`, `MISE_DISABLE_TOOLS` from
-`toolchain.disable`).
+`toolchain.disable`). Cloud sittings set `HOME`, `OMP_OPERATOR_WORKSPACE` and `MISE_TRUSTED_CONFIG_PATHS` to the
+thread's mirrored paths.
 
 omp is started as:
 

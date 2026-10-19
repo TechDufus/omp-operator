@@ -26,6 +26,7 @@ import (
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 
 	"github.com/TechDufus/omp-operator/api/v1alpha1"
+	"github.com/TechDufus/omp-operator/internal/cloudspec"
 	"github.com/TechDufus/omp-operator/internal/store"
 )
 
@@ -39,6 +40,11 @@ const (
 
 	authTypeSSH   = "ssh"
 	authTypeToken = "token"
+
+	// Files of a thread in the store.
+	fileSource = "source.bundle"
+	fileResult = "result.bundle"
+	fileSetup  = "setup.tar.gz"
 )
 
 // errNoArtifact reports a Flux source that has no artifact yet.
@@ -59,11 +65,24 @@ func (s *Server) agentPlan(ctx context.Context, agent *v1alpha1.OmpAgent) (*Plan
 	return plan, nil
 }
 
-// sessionPlan is the plan of a session pod's prepare container.
-func (s *Server) sessionPlan(ctx context.Context, agent *v1alpha1.OmpAgent, sess *v1alpha1.OmpSession) (*Plan, error) {
-	plan, err := s.agentPlan(ctx, agent)
-	if err != nil {
-		return nil, err
+// sessionPlan is the plan of a session pod's prepare container. thread is the OmpThread of a
+// thread sitting, nil for other sessions.
+func (s *Server) sessionPlan(ctx context.Context, agent *v1alpha1.OmpAgent, sess *v1alpha1.OmpSession, thread *v1alpha1.OmpThread) (*Plan, error) {
+	var plan *Plan
+	if thread != nil {
+		// A sitting rebuilds the repository from the thread's files: no agent workspace, links or
+		// stored toolchain; the toolchain is cached per repository by the driver.
+		plan = &Plan{Thread: s.threadPlan(agent, thread)}
+	} else {
+		var err error
+		if plan, err = s.agentPlan(ctx, agent); err != nil {
+			return nil, err
+		}
+		if ws := agent.Spec.Workspace; ws != nil {
+			for _, l := range ws.Links {
+				plan.Links = append(plan.Links, Link{Path: l.Path, Target: l.Target})
+			}
+		}
 	}
 	for i := range agent.Spec.Skills {
 		src, err := s.skillPlan(ctx, i, &agent.Spec.Skills[i])
@@ -72,16 +91,56 @@ func (s *Server) sessionPlan(ctx context.Context, agent *v1alpha1.OmpAgent, sess
 		}
 		plan.Skills = append(plan.Skills, src)
 	}
-	if ws := agent.Spec.Workspace; ws != nil {
-		for _, l := range ws.Links {
-			plan.Links = append(plan.Links, Link{Path: l.Path, Target: l.Target})
-		}
-	}
 	if sess.Spec.ContinuityKey != "" {
 		plan.Continuity = &ContinuityPlan{ID: store.ContinuityID(sess.Spec.ContinuityKey)}
 	}
 	plan.Kubeconfig = agent.Spec.ServiceAccountName != ""
 	return plan, nil
+}
+
+// threadPlan describes how prepare restores the workspace and home of a thread.
+func (s *Server) threadPlan(agent *v1alpha1.OmpAgent, thread *v1alpha1.OmpThread) *ThreadPlan {
+	spec := &thread.Spec
+	tp := &ThreadPlan{
+		Name:          thread.Name,
+		Branch:        cloudspec.Branch(thread.Name),
+		RemoteURL:     spec.Repo.RemoteURL,
+		BaseRef:       spec.Repo.BaseRef,
+		BaseCommit:    spec.Repo.BaseCommit,
+		HandoffCommit: spec.Repo.HandoffCommit,
+		HasSource:     s.hasThreadFile(thread, fileSource),
+		HasResult:     s.hasThreadFile(thread, fileResult),
+		HasSetup:      s.hasThreadFile(thread, fileSetup),
+		Author:        ThreadAuthor{Name: spec.Author.Name, Email: spec.Author.Email},
+	}
+	var hosts []v1alpha1.CloudGitHost
+	if agent.Spec.Cloud != nil {
+		hosts = agent.Spec.Cloud.Git
+	}
+	host, fetchURL, _ := cloudspec.MatchGitHost(hosts, spec.Repo.RemoteURL)
+	tp.FetchURL = fetchURL
+	if host != nil {
+		var g GitSource
+		applyGitAuth(&g, &host.Auth, CloudGitAuthID)
+		tp.AuthDir, tp.AuthType, tp.Username = g.AuthDir, g.AuthType, g.Username
+	}
+	for i, p := range spec.SecretFiles {
+		tp.SecretFiles = append(tp.SecretFiles, ThreadSecretFile{Key: ThreadSecretFileKey(i), Path: p})
+	}
+	if agent.Spec.Toolchain != nil {
+		tp.Toolchain = &ToolchainPlan{Disable: agent.Spec.Toolchain.Disable}
+	}
+	return tp
+}
+
+// hasThreadFile reports whether the thread's stored file exists.
+func (s *Server) hasThreadFile(thread *v1alpha1.OmpThread, file string) bool {
+	f, err := s.Store.OpenThreadFile(thread.Namespace, thread.Name, file)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
 }
 
 func toolchainPlan(agent *v1alpha1.OmpAgent) *ToolchainPlan {
@@ -142,21 +201,28 @@ func pathOrDefault(p string) string {
 	return p
 }
 
-// applyGitAuth sets the auth fields of g for the auth Secret mounted at AuthDir(id).
-func applyGitAuth(g *GitSource, auth *v1alpha1.GitAuth, id string) {
+// GitAuthFor describes the auth Secret of a git source mounted at AuthDir(id): its directory,
+// "ssh" or "token", and the username for token auth. All are empty when auth has no usable keys.
+func GitAuthFor(auth *v1alpha1.GitAuth, id string) (authDir, authType, username string) {
 	if auth == nil {
-		return
+		return "", "", ""
 	}
 	switch {
 	case auth.SSHKeySecretRef != nil:
-		g.AuthDir, g.AuthType = AuthDir(id), authTypeSSH
+		return AuthDir(id), authTypeSSH, ""
 	case auth.TokenSecretRef != nil:
-		g.AuthDir, g.AuthType = AuthDir(id), authTypeToken
-		g.Username = auth.Username
-		if g.Username == "" {
-			g.Username = defaultGitUsername
+		username = auth.Username
+		if username == "" {
+			username = defaultGitUsername
 		}
+		return AuthDir(id), authTypeToken, username
 	}
+	return "", "", ""
+}
+
+// applyGitAuth sets the auth fields of g for the auth Secret mounted at AuthDir(id).
+func applyGitAuth(g *GitSource, auth *v1alpha1.GitAuth, id string) {
+	g.AuthDir, g.AuthType, g.Username = GitAuthFor(auth, id)
 }
 
 // fluxArtifact returns the artifact of a Flux GitRepository or OCIRepository.

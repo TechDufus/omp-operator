@@ -241,6 +241,47 @@ func SystemPrompt(instructions string, creds []Credential, tools []Tool) string 
 	return strings.Join(parts, "\n\n")
 }
 
+// Cloud describes a cloud thread sitting for the "Running in the cloud" section.
+type Cloud struct {
+	// Repo is the repository's display name.
+	Repo string
+	// Workspace is where the repository is checked out in the pod.
+	Workspace string
+	// Branch is the result branch checked out in the pod.
+	Branch string
+	// LocalBranch is the branch the user had checked out at handoff; may be empty.
+	LocalBranch string
+	// Push is true when the branch is pushed to the remote after every turn.
+	Push bool
+	// SecretFiles are the shipped secret files, workspace-relative.
+	SecretFiles []string
+}
+
+// CloudSection returns the "Running in the cloud" section of a thread sitting.
+func CloudSection(c Cloud) string {
+	var b strings.Builder
+	b.WriteString("## Running in the cloud\n")
+	fmt.Fprintf(&b, "You continue this work as an omp cloud agent. The repository %s is checked out at %s on branch %s",
+		c.Repo, c.Workspace, c.Branch)
+	if c.LocalBranch != "" {
+		fmt.Fprintf(&b, ", based on %s", c.LocalBranch)
+	}
+	b.WriteString(".\n")
+	b.WriteString("- Work autonomously: nobody watches live. When you need a decision, end your turn and ask in your reply.\n")
+	push := "the user pulls the branch from the operator"
+	if c.Push {
+		push = "the branch is pushed for you after each turn"
+	}
+	fmt.Fprintf(&b, "- Commit as you go with clear messages; anything uncommitted is committed for you when the turn ends. "+
+		"Do not push and do not change git remotes; %s.\n", push)
+	files := "none"
+	if len(c.SecretFiles) > 0 {
+		files = strings.Join(c.SecretFiles, ", ")
+	}
+	fmt.Fprintf(&b, "- These files were shipped as secrets and must never be printed or committed: %s.", files)
+	return b.String()
+}
+
 func marshal(v any) (string, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

@@ -35,6 +35,7 @@ import (
 	"github.com/TechDufus/omp-operator/api/v1alpha1"
 	"github.com/TechDufus/omp-operator/internal/config"
 	"github.com/TechDufus/omp-operator/internal/store"
+	"github.com/TechDufus/omp-operator/internal/threads"
 )
 
 const (
@@ -59,6 +60,8 @@ type Server struct {
 	Options   *config.Options
 	// Runner executes host tool calls and describes the tools; *actions.Runner.
 	Runner ActionRunner
+	// Threads is the turn log of cloud threads; the thread routes use it.
+	Threads *threads.Log
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 
@@ -88,6 +91,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+sess+"/events", s.session(s.handleEvents))
 	mux.HandleFunc("PUT "+sess+"/transcript", s.session(s.handleTranscript))
 	mux.HandleFunc("POST "+sess+"/complete", s.session(s.handleComplete))
+
+	mux.HandleFunc("GET "+sess+"/thread/source", s.threadSession(s.handleThreadSource))
+	mux.HandleFunc("GET "+sess+"/thread/result", s.threadSession(s.handleGetThreadResult))
+	mux.HandleFunc("PUT "+sess+"/thread/result", s.threadSession(s.handlePutThreadResult))
+	mux.HandleFunc("GET "+sess+"/thread/setup", s.threadSession(s.handleThreadSetup))
+	mux.HandleFunc("GET "+sess+"/thread/next", s.threadSession(s.handleThreadNext))
+	mux.HandleFunc("GET "+sess+"/thread/control", s.threadSession(s.handleThreadControl))
+	mux.HandleFunc("POST "+sess+"/thread/turns/{id}/complete", s.threadSession(s.handleThreadTurnComplete))
+	mux.HandleFunc("GET "+sess+"/toolchains/{hash}", s.threadSession(s.handleGetCloudToolchain))
+	mux.HandleFunc("PUT "+sess+"/toolchains/{hash}", s.threadSession(s.handlePutCloudToolchain))
 
 	mux.HandleFunc("GET "+agent+"/plan", s.agent(s.handleAgentPlan))
 	mux.HandleFunc("GET "+agent+"/toolchain", s.agent(s.handleAgentToolchain))

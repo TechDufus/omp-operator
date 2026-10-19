@@ -15,6 +15,7 @@ See [sessions](../sessions.md) for how they run.
 | `priority` | int 0-3 | computed: 1 | Lower runs first among the agent's Pending sessions |
 | `continuityKey` | string | | Sessions of one agent with the same key share omp history |
 | `event` | `{key, groupId, name, severity}` | | Set on webhook sessions |
+| `threadRef.name` | string | | The `OmpThread` this session is a sitting of. Its prompt is the first queued message; the sitting then takes messages from the thread until it idles out. See [OmpThread](ompthread.md) |
 
 ## status
 
@@ -43,10 +44,11 @@ only what you set.
 |---|---|
 | `agent` | Agent name |
 | `trigger` | Trigger name |
-| `kind` | `webhook`, `schedule` or `manual` |
+| `kind` | `webhook`, `schedule`, `manual` or `cloud` |
 | `group` | First 16 hex of sha256 of the event key (webhook sessions) |
 | `severity` | Event severity (webhook sessions) |
 | `continuity` | First 16 hex of sha256 of `continuityKey` |
+| `thread` | Thread name (cloud sittings) |
 
 ## Naming and ownership
 
@@ -60,3 +62,7 @@ A session is owned by its `OmpAgent` and, when it has one, its `OmpTrigger`. It 
 `omp.techdufus.com/cleanup`, which deletes its stored files (events, transcript, report) and, when no other
 session of the agent has the same `continuity` label, the continuity tarball. It is deleted `completionTime` +
 the agent's `sessionRetention` after it ended.
+
+A sitting of a thread (`threadRef`) is named `<thread>-<n>` and controlled by its [OmpThread](ompthread.md),
+which creates it. It leaves the continuity tarball to the thread's finalizer, because all sittings of a thread
+share it.

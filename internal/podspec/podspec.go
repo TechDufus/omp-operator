@@ -38,6 +38,7 @@ import (
 	"github.com/TechDufus/omp-operator/api/v1alpha1"
 	"github.com/TechDufus/omp-operator/internal/agentapi"
 	"github.com/TechDufus/omp-operator/internal/agentspec"
+	"github.com/TechDufus/omp-operator/internal/cloudspec"
 	"github.com/TechDufus/omp-operator/internal/config"
 	"github.com/TechDufus/omp-operator/internal/gateway"
 )
@@ -65,6 +66,9 @@ const (
 	containerAgent   = "agent"
 
 	miseOff = "false"
+
+	// pathEnv is PATH in every container: mise shims first, so toolchain tools resolve.
+	pathEnv = agentapi.MiseDataDir + "/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 	volWorkspace = "workspace"
 	volMise      = "mise"
@@ -154,15 +158,17 @@ func TokenSecret(namespace, name, agent string) (*corev1.Secret, error) {
 	}, nil
 }
 
-// SessionPod builds the pod of the given attempt (1-based) of session s. Owner references
-// are left to the caller.
-func SessionPod(agent *v1alpha1.OmpAgent, s *v1alpha1.OmpSession, opts *config.Options, attempt int32) *corev1.Pod {
-	return build(buildParams{
+// SessionPod builds the pod of the given attempt (1-based) of session s. thread is the OmpThread
+// of a thread sitting (s.Spec.ThreadRef) and nil for every other session. Owner references are
+// left to the caller.
+func SessionPod(agent *v1alpha1.OmpAgent, s *v1alpha1.OmpSession, thread *v1alpha1.OmpThread, opts *config.Options, attempt int32) *corev1.Pod {
+	p := buildParams{
 		agent:     agent,
 		opts:      opts,
 		namespace: s.Namespace,
 		name:      SessionPodName(s.Name, attempt),
 		session:   true,
+		thread:    thread,
 		labels: map[string]string{
 			v1alpha1.LabelSession: labelValue(s.Name),
 			v1alpha1.LabelRole:    string(v1alpha1.PodRoleSession),
@@ -172,7 +178,20 @@ func SessionPod(agent *v1alpha1.OmpAgent, s *v1alpha1.OmpSession, opts *config.O
 		tokenSecret: agentapi.SessionTokenSecretName(s.Name),
 		deadline:    int64((SessionTimeout(agent) + deadlineSlack) / time.Second),
 		mainArg:     "run",
-	})
+	}
+	if thread != nil {
+		p.labels[v1alpha1.LabelThread] = labelValue(thread.Name)
+		p.deadline = int64((cloudspec.MaxSitting(cloudOf(agent)) + deadlineSlack) / time.Second)
+	}
+	return build(p)
+}
+
+// cloudOf returns the agent's cloud settings, or an empty spec (all defaults) when it has none.
+func cloudOf(agent *v1alpha1.OmpAgent) *v1alpha1.CloudSpec {
+	if agent.Spec.Cloud != nil {
+		return agent.Spec.Cloud
+	}
+	return &v1alpha1.CloudSpec{}
 }
 
 // ToolsyncPod builds the pod that installs the agent's toolchain, named for time t. Owner
@@ -207,6 +226,8 @@ type buildParams struct {
 	tokenSecret string
 	deadline    int64
 	mainArg     string
+	// thread is the OmpThread of a thread sitting: its paths, secrets and git host shape the pod.
+	thread *v1alpha1.OmpThread
 }
 
 func build(p buildParams) *corev1.Pod {
@@ -225,12 +246,20 @@ func build(p buildParams) *corev1.Pod {
 	labels[v1alpha1.LabelAgent] = agent.Name
 	maps.Copy(labels, p.labels)
 
-	vols := baseVolumes(p.tokenSecret)
+	home, workspace, sz := agentapi.HomeDir, agentapi.WorkspaceDir, sessionSizes
+	var cloud *threadParts
+	if p.thread != nil {
+		home, workspace = cloudspec.PodPaths(p.thread.Spec.Paths)
+		sz = threadSizes
+		cloud = newThreadParts(agent, p.thread)
+	}
+
+	vols := baseVolumes(p.tokenSecret, sz)
 	shared := []corev1.VolumeMount{
-		{Name: volWorkspace, MountPath: agentapi.WorkspaceDir},
+		{Name: volWorkspace, MountPath: workspace},
 		{Name: volMise, MountPath: agentapi.MiseDir},
-		{Name: volHome, MountPath: agentapi.HomeDir},
-		{Name: volTmp, MountPath: "/tmp"},
+		{Name: volHome, MountPath: home},
+		{Name: volTmp, MountPath: tmpDir},
 		{Name: volRun, MountPath: agentapi.RunDir},
 		{Name: volToken, MountPath: path.Dir(agentapi.TokenFile), ReadOnly: true},
 	}
@@ -268,15 +297,21 @@ func build(p buildParams) *corev1.Pod {
 		}
 	}
 
+	if cloud != nil {
+		vols = append(vols, cloud.vols...)
+		initMounts = append(initMounts, cloud.initMounts...)
+	}
+
 	commonEnv := []corev1.EnvVar{
 		{Name: p.envName, Value: p.envValue},
 		{Name: agentapi.EnvAPI, Value: p.opts.AgentAPIURL()},
-		{Name: agentapi.EnvWorkspace, Value: agentapi.WorkspaceDir},
-		{Name: "HOME", Value: agentapi.HomeDir},
+		{Name: agentapi.EnvWorkspace, Value: workspace},
+		{Name: "HOME", Value: home},
+		{Name: "PATH", Value: pathEnv},
 		{Name: "MISE_DATA_DIR", Value: agentapi.MiseDataDir},
 		{Name: "MISE_CACHE_DIR", Value: "/tmp/mise-cache"},
 		{Name: "MISE_STATE_DIR", Value: "/tmp/mise-state"},
-		{Name: "MISE_TRUSTED_CONFIG_PATHS", Value: agentapi.WorkspaceDir},
+		{Name: "MISE_TRUSTED_CONFIG_PATHS", Value: workspace},
 		{Name: "MISE_DISABLE_TOOLS", Value: disabledTools(agent)},
 		{Name: "MISE_AUTO_INSTALL", Value: miseOff},
 		{Name: "MISE_EXEC_AUTO_INSTALL", Value: miseOff},
@@ -303,6 +338,9 @@ func build(p buildParams) *corev1.Pod {
 		}
 		if agent.Spec.ServiceAccountName != "" {
 			mainEnv = append(mainEnv, corev1.EnvVar{Name: "KUBECONFIG", Value: agentapi.KubeconfigFile})
+		}
+		if cloud != nil {
+			mainEnv = append(mainEnv, cloud.mainEnv...)
 		}
 
 		vols = append(vols, agent.Spec.Pod.Volumes...)
@@ -338,7 +376,7 @@ func build(p buildParams) *corev1.Pod {
 				Image:           image,
 				Command:         []string{DriverBinary},
 				Args:            []string{"prepare"},
-				WorkingDir:      agentapi.WorkspaceDir,
+				WorkingDir:      workspace,
 				Env:             slices.Clone(commonEnv),
 				VolumeMounts:    initMounts,
 				SecurityContext: secCtx(),
@@ -348,7 +386,7 @@ func build(p buildParams) *corev1.Pod {
 				Image:           image,
 				Command:         []string{DriverBinary},
 				Args:            []string{p.mainArg},
-				WorkingDir:      agentapi.WorkspaceDir,
+				WorkingDir:      workspace,
 				Env:             mainEnv,
 				Resources:       resources,
 				VolumeMounts:    mainMounts,
@@ -357,6 +395,14 @@ func build(p buildParams) *corev1.Pod {
 			Volumes: vols,
 		},
 	}
+	if cloud != nil {
+		pod.Spec.TerminationGracePeriodSeconds = new(ThreadGracePeriodSeconds)
+		if cloud.push {
+			// A native sidecar: it starts after prepare and stops with the agent container.
+			pod.Spec.InitContainers = append(pod.Spec.InitContainers, cloud.gitpush(image, secCtx(), workspace))
+			pod.Spec.Volumes = append(pod.Spec.Volumes, gitpushVolume())
+		}
+	}
 	if p.session {
 		pod.Spec.NodeSelector = maps.Clone(agent.Spec.Pod.NodeSelector)
 		pod.Spec.Tolerations = slices.Clone(agent.Spec.Pod.Tolerations)
@@ -364,7 +410,7 @@ func build(p buildParams) *corev1.Pod {
 	return pod
 }
 
-func baseVolumes(tokenSecret string) []corev1.Volume {
+func baseVolumes(tokenSecret string, sz sizes) []corev1.Volume {
 	empty := func(name, size string) corev1.Volume {
 		v := corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}
 		if size != "" {
@@ -374,10 +420,10 @@ func baseVolumes(tokenSecret string) []corev1.Volume {
 		return v
 	}
 	return []corev1.Volume{
-		empty(volWorkspace, "2Gi"),
-		empty(volMise, "2Gi"),
-		empty(volHome, "1Gi"),
-		empty(volTmp, "1Gi"),
+		empty(volWorkspace, sz.workspace),
+		empty(volMise, sz.mise),
+		empty(volHome, sz.home),
+		empty(volTmp, sz.tmp),
 		empty(volRun, ""),
 		{Name: volToken, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 			SecretName:  tokenSecret,

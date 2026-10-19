@@ -461,10 +461,13 @@ func TestSessionAgentGates(t *testing.T) {
 		}
 	})
 
-	t.Run("an unfinished pod of the agent blocks", func(t *testing.T) {
+	t.Run("an unfinished toolsync pod of the agent blocks", func(t *testing.T) {
 		h := newSessHarness(t, sessAgent("triage"), sessSession("s1", "triage", time.Minute), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-			Namespace: sessNS, Name: "stray",
-			Labels: map[string]string{"app.kubernetes.io/managed-by": "omp-operator", "omp.techdufus.com/agent": "triage"},
+			Namespace: sessNS, Name: "triage-toolsync-1",
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "omp-operator", "omp.techdufus.com/agent": "triage",
+				"omp.techdufus.com/role": "toolsync",
+			},
 		}})
 		if res := h.reconcile("s1"); res.RequeueAfter != 10*time.Second || len(h.pods()) != 1 {
 			t.Errorf("requeue = %v pods = %d", res.RequeueAfter, len(h.pods()))

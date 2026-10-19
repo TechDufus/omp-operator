@@ -48,6 +48,11 @@ session is `Failed`.
 The title is the agent's own `finish` title. If there is none (a failed session), it is
 `<agent>: session <name> failed`, and the summary is the session's error.
 
+A cloud agent's sinks are told about each finished thread turn instead of about its sittings. The result
+is `failed` for a failed turn, `fixed` when the turn changed files and `ok` otherwise; the webhook payload's
+`session` is `<namespace>/<thread>`, the title `<thread title>: <turn title>`, the summary the first 800 characters
+of the reply (or the error), and the link `<dashboard-url>/threads/<namespace>/<thread>`.
+
 Verify a webhook sink's signature by computing the HMAC-SHA256 of the raw request body with the secret and
 comparing it, in constant time, to the hex string after `sha256=`.
 
