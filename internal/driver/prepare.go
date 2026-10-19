@@ -53,6 +53,12 @@ func (d *Driver) Prepare(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("fetch plan: %w", err)
 	}
+	if plan.Thread != nil {
+		if !session {
+			return errors.New("a thread plan needs a session identity")
+		}
+		return d.prepareThread(ctx, plan)
+	}
 
 	revision, err := d.prepareWorkspace(ctx, plan.Workspace)
 	if err != nil {

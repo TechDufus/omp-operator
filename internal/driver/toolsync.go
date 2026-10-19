@@ -103,7 +103,7 @@ func (d *Driver) Toolsync(ctx context.Context) error {
 	}
 
 	d.Log.Info("installing toolchain", "hash", hash)
-	if err := d.miseInstall(ctx); err != nil {
+	if err := d.miseInstall(ctx, miseTimeout); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp("", "toolchain-*.tar.gz")
@@ -136,11 +136,12 @@ func (d *Driver) unchanged(ctx context.Context, hash string) error {
 	return nil
 }
 
-func (d *Driver) miseInstall(ctx context.Context) error {
+// miseInstall runs `mise install` in the workspace; env is added to the process environment.
+func (d *Driver) miseInstall(ctx context.Context, timeout time.Duration, env ...string) error {
 	if err := os.MkdirAll(d.Paths.MiseDataDir, 0o755); err != nil {
 		return err
 	}
-	ictx, cancel := child(ctx, miseTimeout)
+	ictx, cancel := child(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ictx, d.MiseBin, "install", "--yes")
 	cmd.Dir = d.Paths.Workspace
@@ -149,6 +150,7 @@ func (d *Driver) miseInstall(ctx context.Context) error {
 		"MISE_DATA_DIR="+d.Paths.MiseDataDir,
 		"MISE_YES=1",
 	)
+	cmd.Env = append(cmd.Env, env...)
 	cmd.Stdout, cmd.Stderr = d.Stderr, d.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("mise install: %w", err)

@@ -64,7 +64,7 @@ survives `dev:up` and lasts until `dev:down`.
 ```text
 api/v1alpha1/        the four kinds
 cmd/main.go          the manager: controllers, hooks, dashboard and agent API servers
-cmd/driver/          omp-operator-driver: prepare, run and toolsync inside pods
+cmd/driver/          omp-operator-driver: prepare, run and toolsync inside pods, and the gitpush sidecar of cloud thread pods
 internal/controller/ one reconciler per kind
 internal/hooks/      the webhook handler        internal/episodes/  grouping and budget decisions (pure)
 internal/adapters/   alertmanager, grafana, generic    internal/celx/ CEL environments and cache
@@ -93,12 +93,47 @@ images/runtime/      runtime image          images/e2e/  e2e image
   `FAKEOMP_SCRIPT` (JSON: `mode` of `normal`, `exit-early`, `no-finish`, `garbage` or `hang`; `calls`, a list of
   `{tool, args}`; and `finish`). `FAKEOMP_ECHO_ENV` names an environment variable whose value fakeomp leaks
   on purpose into its events and results, so the redaction tests can check it is scrubbed. The driver tests and the e2e suite run against it.
+  A prompt that starts with `FAKEOMP:` carries the script of that one turn as JSON and replaces the calls and
+  `finish` for it, which is how cloud thread turns are scripted: `files` (relative path to content, written into
+  the working directory), `checkFiles` and `checkEnv` (fakeomp writes `fakeomp-check.txt` there: `cwd: <dir>`,
+  then `<path>: present|absent` and `<NAME>: set|unset` lines; paths may be absolute), `reply` (default
+  `fake reply`) and `mode` (`hang` or `exit-early`, as above). Whatever the turn, `get_last_assistant_text`
+  answers with the reply, followed by the `FAKEOMP_ECHO_ENV` value when that is set, and the same text is sent as
+  an assistant `message_end` event. fakeomp skips the `finish` call when the client registered host tools and
+  `finish` is not one of them, as in cloud threads.
 - **`test/ompcompat`** (build tag `ompcompat`, `mise run ompcompat`) checks the driver's assumptions against
   the real pinned omp, including that the built-in tool list matches `actions.ReservedToolNames`. When
   you bump the omp version (`OMP_VERSION` in `mise.toml`, `images/runtime/Dockerfile`, and the `omp-rpc`
   module in `go.mod`), this is the suite that tells you what changed.
 - **e2e** (build tag `e2e`, `mise run test-e2e`) installs the chart on kind with the e2e image and exercises
   webhooks, schedules, actions, continuity, the dashboard and metrics.
+
+## The driver in cloud threads
+
+A sitting of an `OmpThread` (a session with `spec.threadRef`) uses the same three driver commands, with these differences:
+
+- **`prepare`** rebuilds the user's workspace in the pod: `git init`, fetch the base commit from the remote (the
+  branch the base came from, else the commit by id), then the tip: the previous sitting's stored result if there is
+  one, else the uploaded handoff bundle, else the base. The thread branch `omp-cloud/<thread>` is checked out
+  there, `origin` is set without credentials, shipped secret files are copied (mode 0600) and kept out of commits
+  with `.git/info/exclude`, the shipped omp setup is extracted into `$HOME/.omp/agent`, and the mise toolchain
+  comes from the agent's cache (`toolchains/<hash>`) or is installed and cached. A failed install is an event.
+- **`run`** merges the pod's overrides into the user's own `config.yml` (model roles of providers the gateway does
+  not serve are mapped to the thread's model; computer use, collab rooms and plugin auto-updates are off) and
+  starts one omp with no tool flag when the agent allows every built-in tool. It then serves the thread's turns
+  one after another: after each turn it commits what changed, keeps the branch on the newest commit, stores the
+  result bundle on the operator and, with a push sidecar, asks it to push. It ends the sitting after
+  `cloud.idleTimeout` without a turn, or when no further turn would fit in `cloud.maxSitting`. A turn that ends
+  for auth or retryable reasons (or a pod that is terminating) stays running on the operator and is delivered to the
+  next sitting; the work is committed, bundled and its conversation stored first.
+- **`gitpush`** is the sidecar of pods whose git host has `push`. It listens on `127.0.0.1:8090` and serves only
+  `POST /push {"head": "<commit>"}`. The remote URL, branch and credentials come from its own environment
+  (`OMP_GITPUSH_URL`, `OMP_GITPUSH_BRANCH`, `OMP_GITPUSH_WORKSPACE`, `OMP_GITPUSH_AUTH`, `OMP_GITPUSH_AUTHDIR`,
+  `OMP_GITPUSH_USERNAME`); a request can only name a commit. It force-pushes from a private bare repository
+  that borrows the workspace's objects (git alternates) and runs git with a clean environment, so nothing in the
+  agent's `.git/config` can redirect or intercept the push. Errors are at most 300 characters, with the token removed.
+
+`OMP_GITPUSH_ADDR` in the agent container tells `run` where the sidecar is; without it a turn only stores its result.
 
 ## Generated files
 

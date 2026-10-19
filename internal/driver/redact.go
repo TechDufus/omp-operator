@@ -65,6 +65,13 @@ func NewRedactor(sources []agentapi.RedactSource, getenv func(string) string, re
 		if s.File != "" {
 			if raw, err := readFile(s.File); err == nil {
 				add(string(raw), name)
+				if s.Lines {
+					for line := range strings.Lines(string(raw)) {
+						if value, ok := lineValue(line); ok {
+							add(value, name)
+						}
+					}
+				}
 			}
 		}
 	}
@@ -97,6 +104,23 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// lineValue is the value of a key=value or key: value line: what follows the first '=' or ':',
+// trimmed and with one pair of surrounding quotes removed.
+func lineValue(line string) (string, bool) {
+	_, value, ok := strings.Cut(line, "=")
+	if colon := strings.IndexByte(line, ':'); colon >= 0 && (!ok || colon < strings.IndexByte(line, '=')) {
+		value, ok = line[colon+1:], true
+	}
+	if !ok {
+		return "", false
+	}
+	value = strings.TrimSpace(value)
+	if n := len(value); n >= 2 && (value[0] == '"' || value[0] == '\'') && value[n-1] == value[0] {
+		value = value[1 : n-1]
+	}
+	return value, true
 }
 
 // jsonEscape returns v as it appears inside a JSON string literal.

@@ -38,6 +38,22 @@ limitations under the License.
 //	                  and added as "fakeomp_echo" to the args of every
 //	                  tool_execution_start event.
 //
+// # Per-turn scripts
+//
+// A prompt whose message starts with "FAKEOMP:" carries the script of that one turn as JSON
+// after the prefix, and replaces the FAKEOMP_SCRIPT calls and finish for it:
+//
+//	{"mode": "normal|hang|exit-early", "files": {"<relative path>": "<content>"},
+//	 "checkFiles": ["<path>"], "checkEnv": ["<NAME>"], "reply": "<text>"}
+//
+// The turn writes "files" into the working directory, then writes fakeomp-check.txt there:
+// "cwd: <dir>", one "<path>: present|absent" line per checkFiles entry (relative paths are
+// resolved against the working directory) and one "<NAME>: set|unset" line per checkEnv
+// entry. It never calls finish. Every turn, scripted or not, makes get_last_assistant_text
+// answer "reply" (default "fake reply"), followed by a space and the value of the
+// FAKEOMP_ECHO_ENV variable when that is set; the same text is sent as an assistant
+// message_end event.
+//
 // # Modes
 //
 //	normal     the default: calls, then finish, then prompt_result completed.
@@ -58,6 +74,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,6 +88,10 @@ const (
 	modeGarbage   = "garbage"
 	modeExitEarly = "exit-early"
 	modeHang      = "hang"
+
+	defaultReply = "fake reply"
+	scriptPrefix = "FAKEOMP:"
+	checkFile    = "fakeomp-check.txt"
 
 	sessionID    = "fake-session"
 	sessionFile  = "fake.jsonl"
@@ -90,6 +111,23 @@ type script struct {
 	Mode   string                     `json:"mode"`
 	Calls  []call                     `json:"calls"`
 	Finish map[string]json.RawMessage `json:"finish"`
+}
+
+// turnScript is the script of one turn, given in the prompt itself.
+type turnScript struct {
+	Mode       string            `json:"mode"`
+	Files      map[string]string `json:"files"`
+	CheckFiles []string          `json:"checkFiles"`
+	CheckEnv   []string          `json:"checkEnv"`
+	Reply      string            `json:"reply"`
+}
+
+func validMode(mode string) bool {
+	switch mode {
+	case "", modeNormal, modeNoFinish, modeGarbage, modeExitEarly, modeHang:
+		return true
+	}
+	return false
 }
 
 func loadScript() (script, error) {
@@ -162,11 +200,14 @@ type server struct {
 	outMu sync.Mutex
 	out   io.Writer
 
-	mu          sync.Mutex
-	hostTools   []string
-	sessionDir  string
-	waiting     map[string]chan omprpc.HostToolResult
-	activeAbort map[int64]context.CancelFunc
+	mu        sync.Mutex
+	hostTools []string
+	// hostToolsSet records that the client registered host tools, even none.
+	hostToolsSet bool
+	lastReply    *string
+	sessionDir   string
+	waiting      map[string]chan omprpc.HostToolResult
+	activeAbort  map[int64]context.CancelFunc
 
 	seq atomic.Int64
 }
@@ -286,7 +327,7 @@ func (s *server) handle(ctx context.Context, line []byte) {
 			names = append(names, tool.Name)
 		}
 		s.mu.Lock()
-		s.hostTools = names
+		s.hostTools, s.hostToolsSet = names, true
 		s.mu.Unlock()
 		s.respond(frame.ID, frame.Type, omprpc.SetHostToolsResult{ToolNames: names})
 	case "get_state":
@@ -294,7 +335,12 @@ func (s *server) handle(ctx context.Context, line []byte) {
 	case "open_session":
 		s.openSession(frame.ID, line)
 	case "prompt":
-		s.prompt(ctx, frame.ID)
+		s.prompt(ctx, frame.ID, line)
+	case "get_last_assistant_text":
+		s.mu.Lock()
+		text := s.lastReply
+		s.mu.Unlock()
+		s.respond(frame.ID, frame.Type, omprpc.GetLastAssistantTextResult{Text: text})
 	case "abort":
 		s.mu.Lock()
 		for _, cancel := range s.activeAbort {
@@ -429,8 +475,29 @@ func (s *server) exportHTML(id string, line []byte) {
 
 // prompt acknowledges a prompt and runs its turn in the background, so abort
 // and host_tool_result frames keep being read while it waits.
-func (s *server) prompt(base context.Context, id string) {
-	if s.script.Mode == modeExitEarly {
+func (s *server) prompt(base context.Context, id string, line []byte) {
+	var cmd omprpc.PromptCommand
+	if err := json.Unmarshal(line, &cmd); err != nil {
+		s.fail(id, "prompt", "invalid_params", err.Error())
+		return
+	}
+	var ts *turnScript
+	if raw, ok := strings.CutPrefix(cmd.Message, scriptPrefix); ok {
+		ts = &turnScript{}
+		if err := json.Unmarshal([]byte(raw), ts); err != nil {
+			s.fail(id, "prompt", "invalid_params", scriptPrefix+" "+err.Error())
+			return
+		}
+		if !validMode(ts.Mode) {
+			s.fail(id, "prompt", "invalid_params", fmt.Sprintf("%s unknown mode %q", scriptPrefix, ts.Mode))
+			return
+		}
+	}
+	mode := s.script.Mode
+	if ts != nil && ts.Mode != "" {
+		mode = ts.Mode
+	}
+	if mode == modeExitEarly {
 		os.Exit(1)
 	}
 	s.respond(id, "prompt", struct{}{})
@@ -446,16 +513,17 @@ func (s *server) prompt(base context.Context, id string) {
 			s.mu.Unlock()
 			cancel()
 		}()
-		status := s.turn(ctx)
-		s.emit(omprpc.PromptResultEvent{AgentInvoked: true, Status: status, SessionSettled: true, ID: &id})
+		status, perr := s.turn(ctx, ts, mode)
+		s.emit(omprpc.PromptResultEvent{AgentInvoked: true, Status: status, SessionSettled: true, ID: &id, Error: perr})
 	}()
 }
 
-// turn plays one agent run and reports how it ended.
-func (s *server) turn(ctx context.Context) omprpc.PromptStatus {
-	if s.script.Mode == modeHang {
+// turn plays one agent run and reports how it ended. ts is the turn's own script, when the
+// prompt carried one: such a turn runs the script instead of the FAKEOMP_SCRIPT calls and finish.
+func (s *server) turn(ctx context.Context, ts *turnScript, mode string) (omprpc.PromptStatus, *omprpc.PromptError) {
+	if mode == modeHang {
 		<-ctx.Done()
-		return omprpc.PromptStatusAborted
+		return omprpc.PromptStatusAborted, nil
 	}
 	s.emit(omprpc.AgentStartEvent{})
 	message := "fakeomp working"
@@ -464,28 +532,109 @@ func (s *server) turn(ctx context.Context) omprpc.PromptStatus {
 	}
 	s.emit(omprpc.NoticeEvent{Level: omprpc.NotifyTypeInfo, Message: message, Source: new("fakeomp")})
 
-	for _, c := range s.script.Calls {
-		if !s.callTool(ctx, c.Tool, c.Args) {
-			return omprpc.PromptStatusAborted
+	reply := defaultReply
+	if ts != nil {
+		if ts.Reply != "" {
+			reply = ts.Reply
 		}
+		if err := runTurnScript(ts); err != nil {
+			return omprpc.PromptStatusError, &omprpc.PromptError{Message: "fakeomp: " + err.Error()}
+		}
+	} else if !s.runLegacy(ctx, mode) {
+		return omprpc.PromptStatusAborted, nil
 	}
-	if s.script.Mode != modeNoFinish {
-		finish := maps.Clone(s.script.Finish)
-		if s.echo != "" {
-			var summary string
-			_ = json.Unmarshal(finish["summary"], &summary)
-			finish["summary"], _ = json.Marshal(summary + " " + s.echo)
-		}
-		args, _ := json.Marshal(finish)
-		if !s.callTool(ctx, "finish", args) {
-			return omprpc.PromptStatusAborted
-		}
+	if s.echo != "" {
+		reply += " " + s.echo
 	}
+	s.mu.Lock()
+	s.lastReply = &reply
+	s.mu.Unlock()
+
 	if err := s.appendSession(`{"type":"message","text":"fake turn"}`); err != nil {
 		fmt.Fprintln(os.Stderr, "fakeomp:", err)
 	}
-	s.emit(omprpc.AgentEndEvent{Messages: []omprpc.AgentMessage{}})
-	return omprpc.PromptStatusCompleted
+	assistant := omprpc.AgentMessage{Value: omprpc.AssistantMessage{
+		Content:    []omprpc.AssistantContent{{Value: omprpc.TextContent{Text: reply}}},
+		API:        "fake",
+		Provider:   "fake",
+		Model:      "fake-model",
+		StopReason: omprpc.StopReasonStop,
+	}}
+	s.emit(omprpc.MessageEndEvent{Message: assistant})
+	s.emit(omprpc.AgentEndEvent{Messages: []omprpc.AgentMessage{assistant}})
+	return omprpc.PromptStatusCompleted, nil
+}
+
+// runLegacy plays the FAKEOMP_SCRIPT calls and finish; false means the run was aborted.
+func (s *server) runLegacy(ctx context.Context, mode string) bool {
+	for _, c := range s.script.Calls {
+		if !s.callTool(ctx, c.Tool, c.Args) {
+			return false
+		}
+	}
+	if mode == modeNoFinish || !s.finishRegistered() {
+		return true
+	}
+	finish := maps.Clone(s.script.Finish)
+	if s.echo != "" {
+		var summary string
+		_ = json.Unmarshal(finish["summary"], &summary)
+		finish["summary"], _ = json.Marshal(summary + " " + s.echo)
+	}
+	args, _ := json.Marshal(finish)
+	return s.callTool(ctx, "finish", args)
+}
+
+// finishRegistered is false only when the client registered host tools and finish is not among
+// them, as in cloud threads; a client that registered none gets finish calls as ever.
+func (s *server) finishRegistered() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.hostToolsSet || slices.Contains(s.hostTools, "finish")
+}
+
+// runTurnScript writes the script's files into the working directory, then its check file.
+func runTurnScript(ts *turnScript) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	for name, content := range ts.Files {
+		if !filepath.IsLocal(name) {
+			return fmt.Errorf("file %q must be relative and stay inside the working directory", name)
+		}
+		path := filepath.Join(cwd, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return err
+		}
+	}
+	if len(ts.CheckFiles) == 0 && len(ts.CheckEnv) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("cwd: " + cwd + "\n")
+	for _, name := range ts.CheckFiles {
+		state := "absent"
+		path := name
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(cwd, name)
+		}
+		if _, err := os.Stat(path); err == nil {
+			state = "present"
+		}
+		b.WriteString(name + ": " + state + "\n")
+	}
+	for _, name := range ts.CheckEnv {
+		state := "unset"
+		if _, ok := os.LookupEnv(name); ok {
+			state = "set"
+		}
+		b.WriteString(name + ": " + state + "\n")
+	}
+	return os.WriteFile(filepath.Join(cwd, checkFile), []byte(b.String()), 0o644)
 }
 
 // callTool issues one host tool call and waits for its result; false means

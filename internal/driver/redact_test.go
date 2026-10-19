@@ -66,6 +66,34 @@ func TestRedactor(t *testing.T) {
 	}
 }
 
+func TestRedactorLinesSources(t *testing.T) {
+	dotenv := "# comment\nAPI_KEY=abcdefghij-key\nexport PASSWORD=\"quoted pass phrase\"\nyaml_key: 'single-quoted-value'\n" +
+		"SHORT=abc\nURL=postgres://u:p@host/db?x=1\nno separator line here\nEMPTY=\n"
+	read := func(string) ([]byte, error) { return []byte(dotenv), nil }
+	none := func(string) string { return "" }
+
+	lines := NewRedactor([]agentapi.RedactSource{{Name: "dotenv", File: "/ws/.env", Lines: true}}, none, read)
+	tests := map[string]string{
+		"key abcdefghij-key used":           "key [redacted:dotenv] used",
+		"pw quoted pass phrase used":        "pw [redacted:dotenv] used",
+		"y single-quoted-value used":        "y [redacted:dotenv] used",
+		"conn postgres://u:p@host/db?x=1":   "conn [redacted:dotenv]",
+		"short abc stays":                   "short abc stays",
+		"the comment and EMPTY stay intact": "the comment and EMPTY stay intact",
+	}
+	for in, want := range tests {
+		if got := lines.String(in); got != want {
+			t.Errorf("String(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	// Without Lines only the whole file is a secret.
+	whole := NewRedactor([]agentapi.RedactSource{{Name: "dotenv", File: "/ws/.env"}}, none, read)
+	if got := whole.String("key abcdefghij-key"); got != "key abcdefghij-key" {
+		t.Errorf("a source without Lines must not scrub single values, got %q", got)
+	}
+}
+
 func TestRedactorEmptyIsPassthrough(t *testing.T) {
 	var nilRedactor *Redactor
 	for _, r := range []*Redactor{nilRedactor, {}} {

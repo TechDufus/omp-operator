@@ -46,6 +46,10 @@ const (
 	eventNudge      = "nudge"
 	eventTranscript = "transcript"
 	eventContinuity = "continuity"
+	eventAssistant  = "assistant"
+	eventTurn       = "turn"
+	eventToolchain  = "toolchain"
+	eventGit        = "git"
 )
 
 // eventSink batches progress events and posts them every interval. Everything it
@@ -124,8 +128,27 @@ func (s *eventSink) drain(frames <-chan omprpc.RpcServerFrame) {
 			s.add(eventNotice, ev.Message)
 		case omprpc.AutoRetryStartEvent:
 			s.add(eventRetry, fmt.Sprintf("retry %d/%d in %dms: %s", ev.Attempt, ev.MaxAttempts, ev.DelayMs, ev.ErrorMessage))
+		case omprpc.MessageEndEvent:
+			if text := assistantText(ev.Message); text != "" {
+				s.add(eventAssistant, text)
+			}
 		}
 	}
+}
+
+// assistantText is the text blocks of an assistant message, joined; other roles yield "".
+func assistantText(m omprpc.AgentMessage) string {
+	msg, ok := m.Value.(omprpc.AssistantMessage)
+	if !ok {
+		return ""
+	}
+	var b strings.Builder
+	for _, block := range msg.Content {
+		if text, ok := block.Value.(omprpc.TextContent); ok {
+			b.WriteString(text.Text)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // truncate cuts s to at most n runes.

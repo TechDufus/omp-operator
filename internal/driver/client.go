@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -311,4 +312,47 @@ func (c *Client) StoredToolchainHash(ctx context.Context) (string, error) {
 // ToolchainUnchanged is POST /v1/agents/{ns}/{name}/toolchain/unchanged.
 func (c *Client) ToolchainUnchanged(ctx context.Context, hash string) error {
 	return c.doJSON(ctx, http.MethodPost, c.path("/toolchain/unchanged"), agentapi.ToolchainHash{Hash: hash}, nil, true)
+}
+
+// PutBundle uploads the git bundle at file with PUT <suffix>.
+func (c *Client) PutBundle(ctx context.Context, suffix, file string) error {
+	resp, err := c.do(ctx, http.MethodPut, c.path(suffix), "application/x-git-bundle", fileBody(file), true)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+
+// NextTurn is GET thread/next: it long-polls up to wait (rounded up to whole seconds, 1 to 50)
+// and returns the turn assigned to this sitting, or nil when there is none. A turn that was
+// delivered but not completed is delivered again, so the call may be retried.
+func (c *Client) NextTurn(ctx context.Context, wait time.Duration) (*agentapi.TurnAssignment, error) {
+	seconds := min(max(int((wait+time.Second-1)/time.Second), 1), 50)
+	resp, err := c.do(ctx, http.MethodGet, c.path("/thread/next?wait="+strconv.Itoa(seconds)), "", nil, true)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNoContent {
+		return nil, nil
+	}
+	var turn agentapi.TurnAssignment
+	if err := json.NewDecoder(resp.Body).Decode(&turn); err != nil {
+		return nil, fmt.Errorf("GET thread/next: decode response: %w", err)
+	}
+	return &turn, nil
+}
+
+// ThreadStop is GET thread/control: whether the running turn was asked to stop.
+func (c *Client) ThreadStop(ctx context.Context) (bool, error) {
+	var control struct {
+		Stop bool `json:"stop"`
+	}
+	err := c.doJSON(ctx, http.MethodGet, c.path("/thread/control"), nil, &control, false)
+	return control.Stop, err
+}
+
+// CompleteTurn is POST thread/turns/{id}/complete.
+func (c *Client) CompleteTurn(ctx context.Context, id int, done agentapi.TurnComplete) error {
+	return c.doJSON(ctx, http.MethodPost, c.path("/thread/turns/"+strconv.Itoa(id)+"/complete"), done, nil, true)
 }

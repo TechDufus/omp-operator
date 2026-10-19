@@ -54,6 +54,8 @@ const (
 	DefaultDownloadMax int64 = 1 << 30
 	// DefaultSessionTimeout applies when the session config carries no timeout.
 	DefaultSessionTimeout = 30 * time.Minute
+	// DefaultControlInterval is how often a thread sitting asks the operator whether the running turn was stopped.
+	DefaultControlInterval = 5 * time.Second
 
 	// extractMax bounds the bytes one extraction may write (zip-bomb guard).
 	extractMax int64 = 8 << 30
@@ -79,6 +81,8 @@ type Paths struct {
 	SystemPrompt string // file given to --append-system-prompt
 	Transcript   string // export_html output
 
+	ThreadSecrets string // where the thread's shipped secret files are mounted (init container)
+
 	SAToken     string // service-account token file, referenced by the kubeconfig
 	SACA        string // service-account CA bundle
 	SANamespace string // file holding the pod's namespace
@@ -101,9 +105,11 @@ func DefaultPaths() Paths {
 		MiseDataDir:  agentapi.MiseDataDir,
 		SystemPrompt: agentapi.SystemPromptFile,
 		Transcript:   agentapi.TranscriptFile,
-		SAToken:      saDir + "/token",
-		SACA:         saDir + "/ca.crt",
-		SANamespace:  saDir + "/namespace",
+
+		ThreadSecrets: agentapi.ThreadSecretsDir,
+		SAToken:       saDir + "/token",
+		SACA:          saDir + "/ca.crt",
+		SANamespace:   saDir + "/namespace",
 	}
 }
 
@@ -131,11 +137,15 @@ type Driver struct {
 	// GitBin and MiseBin are the executables prepare and toolsync run.
 	GitBin  string
 	MiseBin string
+	// PushAddr is the host:port of the push sidecar ($OMP_GITPUSH_ADDR); empty means the thread
+	// has no push, and finalizing a turn only stores the result on the operator.
+	PushAddr string
 
 	ReadyTimeout    time.Duration
 	EventInterval   time.Duration
 	PromptGrace     time.Duration
 	NudgeMax        time.Duration
+	ControlInterval time.Duration
 	ContinuityMax   int64
 	DownloadTimeout time.Duration
 	DownloadMax     int64
@@ -162,9 +172,11 @@ func New(api *Client, paths Paths, log *slog.Logger) *Driver {
 		EventInterval:   DefaultEventInterval,
 		PromptGrace:     DefaultPromptGrace,
 		NudgeMax:        DefaultNudgeMax,
+		ControlInterval: DefaultControlInterval,
 		ContinuityMax:   DefaultContinuityMax,
 		DownloadTimeout: DefaultDownloadTimeout,
 		DownloadMax:     DefaultDownloadMax,
+		PushAddr:        os.Getenv(EnvGitpushAddr),
 	}
 }
 
@@ -173,6 +185,8 @@ const (
 	CmdPrepare  = "prepare"
 	CmdRun      = "run"
 	CmdToolsync = "toolsync"
+	// CmdGitpush is the push sidecar of thread pods; it needs no agent API, see Gitpush.
+	CmdGitpush = "gitpush"
 )
 
 // FromEnv builds the Driver of one subcommand from the pod environment: the API base URL

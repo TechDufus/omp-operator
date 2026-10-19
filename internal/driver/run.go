@@ -37,7 +37,7 @@ import (
 )
 
 const (
-	finishTool = "finish"
+	finishTool = agentapi.FinishToolName
 	// nudgeMessage is sent once when the agent ended without a recorded finish.
 	nudgeMessage = "You ended without calling finish. Call finish now with your report."
 	// maxErrorLen is the longest error the API stores.
@@ -62,6 +62,9 @@ func (d *Driver) Run(ctx context.Context) error {
 	cancel()
 	if err != nil {
 		return fmt.Errorf("fetch session config: %w", err)
+	}
+	if cfg.Thread != nil {
+		return d.runThread(ctx, cfg)
 	}
 	red := d.redactor(cfg)
 	if err := d.writeOmpConfig(cfg); err != nil {
@@ -164,7 +167,7 @@ func failed(outcome, msg string) agentapi.Complete {
 
 // ompArgs is the plan's command line.
 func ompArgs(cfg agentapi.SessionConfig, timeout time.Duration, p Paths) []string {
-	args := []string{"--mode", "rpc", "--no-ui", "--approval-mode", "yolo"}
+	args := []string{"--mode", "rpc", "--no-ui", "--approval-mode", approvalYolo}
 	if len(cfg.Tools) > 0 {
 		args = append(args, "--tools", strings.Join(cfg.Tools, ","))
 	} else {

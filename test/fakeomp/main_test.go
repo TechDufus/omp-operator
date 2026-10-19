@@ -456,6 +456,129 @@ func TestInvalidScriptExits2(t *testing.T) {
 	}
 }
 
+// promptText plays one prompt with the given message.
+func promptText(t *testing.T, h *harness, message string) (omprpc.PromptTurn, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return h.client.PromptAndWait(ctx, omprpc.PromptCommand{Message: message}, 10*time.Second)
+}
+
+func TestTurnScriptWritesFilesChecksAndReplies(t *testing.T) {
+	const secret = "echoed-secret-value"
+	h := start(t, "", "FAKEOMP_ECHO_ENV=ECHO_VAR", "ECHO_VAR="+secret, "PRESENT_VAR=x")
+	root := filepath.Dir(h.sessionDir)
+	abs := filepath.Join(root, "dir", "a.txt")
+
+	script := `FAKEOMP:{"files":{"dir/a.txt":"hello\n"},"checkFiles":["dir/a.txt","missing.txt","` + abs + `"],` +
+		`"checkEnv":["PRESENT_VAR","ABSENT_VAR"],"reply":"scripted reply"}`
+	turn, err := promptText(t, h, script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Result == nil || turn.Result.Status != omprpc.PromptStatusCompleted {
+		t.Fatalf("result = %+v", turn.Result)
+	}
+	if got := string(mustRead(t, filepath.Join(root, "dir", "a.txt"))); got != "hello\n" {
+		t.Fatalf("a.txt = %q", got)
+	}
+	check := string(mustRead(t, filepath.Join(root, checkFile)))
+	want := "cwd: " + root + "\ndir/a.txt: present\nmissing.txt: absent\n" + abs + ": present\n" +
+		"PRESENT_VAR: set\nABSENT_VAR: unset\n"
+	if check != want {
+		t.Fatalf("%s = %q, want %q", checkFile, check, want)
+	}
+	text, err := h.client.GetLastAssistantText(context.Background())
+	if err != nil || text == nil || *text != "scripted reply "+secret {
+		t.Fatalf("last assistant text = %v, %v", text, err)
+	}
+	if got := deref(turn.AssistantText); got != "scripted reply "+secret {
+		t.Fatalf("assistant message text = %q", got)
+	}
+	if got := h.rec.args("finish"); len(got) != 0 {
+		t.Fatalf("a scripted turn must not call finish, got %v", got)
+	}
+
+	// The next turn has its own script; the default reply applies.
+	if _, err := promptText(t, h, `FAKEOMP:{"files":{"b.txt":"2"}}`); err != nil {
+		t.Fatal(err)
+	}
+	if text, _ := h.client.GetLastAssistantText(context.Background()); text == nil || *text != defaultReply+" "+secret {
+		t.Fatalf("second reply = %v", text)
+	}
+	if got := string(mustRead(t, filepath.Join(root, "b.txt"))); got != "2" {
+		t.Fatalf("b.txt = %q", got)
+	}
+}
+
+func TestTurnScriptHangsUntilAbort(t *testing.T) {
+	h := start(t, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = h.client.Abort(ctx)
+	}()
+	turn, err := promptText(t, h, `FAKEOMP:{"mode":"hang"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Result == nil || turn.Result.Status != omprpc.PromptStatusAborted {
+		t.Fatalf("result = %+v", turn.Result)
+	}
+}
+
+func TestTurnScriptErrors(t *testing.T) {
+	h := start(t, "")
+	if _, err := promptText(t, h, `FAKEOMP:{not json`); err == nil {
+		t.Fatal("a malformed script must be rejected")
+	}
+	turn, err := promptText(t, h, `FAKEOMP:{"files":{"../escape.txt":"x"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Result == nil || turn.Result.Status != omprpc.PromptStatusError ||
+		turn.Result.Error == nil || !strings.Contains(turn.Result.Error.Message, "escape.txt") {
+		t.Fatalf("result = %+v", turn.Result)
+	}
+}
+
+func TestFinishSkippedWhenNotRegistered(t *testing.T) {
+	root := t.TempDir()
+	cmd := exec.Command(fakeBinary, "--mode", "rpc", "--session-dir", filepath.Join(root, "s"))
+	cmd.Dir = root
+	rec := &recorder{calls: map[string][]string{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := omprpc.Start(ctx, cmd, omprpc.WithHostTools(rec.tool("echo")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	if _, err := client.PromptAndWait(ctx, omprpc.PromptCommand{Message: "go"}, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.args("finish"); len(got) != 0 {
+		t.Fatalf("finish was called although it is not registered: %v", got)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 func TestParseArgs(t *testing.T) {
 	tests := []struct {
 		name string

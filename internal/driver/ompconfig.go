@@ -32,6 +32,9 @@ import (
 // roleDefault is the omp model role of the main conversation.
 const roleDefault = "default"
 
+// approvalYolo is omp's tool approval mode without prompts: the pod's boundary is the tool list, not a person.
+const approvalYolo = "yolo"
+
 // writeOmpConfig writes what omp reads at startup: config.yml (model roles, thinking level,
 // tool approval), models.yml (only with a gateway), mcp.json, and the system prompt file.
 func (d *Driver) writeOmpConfig(cfg agentapi.SessionConfig) error {
@@ -79,7 +82,7 @@ func ompSettings(m agentapi.ModelConfig) map[string]any {
 			"smol":      small,
 			"tiny":      small,
 		},
-		"tools": map[string]any{"approvalMode": "yolo"},
+		"tools": map[string]any{"approvalMode": approvalYolo},
 	}
 	if m.Thinking != "" {
 		settings["defaultThinkingLevel"] = m.Thinking
