@@ -92,6 +92,12 @@ func (r Request) HasToolResult() bool {
 	return slices.ContainsFunc(r.Messages, func(m Message) bool { return m.Role == "tool" })
 }
 
+// EndsWithToolResult reports whether the last message is a tool result, i.e. the request is the
+// model's next step after a tool call it made.
+func (r Request) EndsWithToolResult() bool {
+	return len(r.Messages) > 0 && r.Messages[len(r.Messages)-1].Role == "tool"
+}
+
 // Option configures New.
 type Option func(*Server)
 
@@ -106,6 +112,15 @@ func WithToolCall(tool, args string) Option {
 	return func(s *Server) { s.tool, s.toolArgs = tool, args }
 }
 
+// ArmToolCall makes the next request that does not follow a tool result answer with a call of
+// tool with the JSON arguments args; the request after that answers with the reply text. It
+// lets a test choose which turn of a long conversation calls a tool.
+func (s *Server) ArmToolCall(tool, args string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.armedTool, s.armedArgs = tool, args
+}
+
 // Server is the running fake provider.
 type Server struct {
 	// URL is the server's base URL (no trailing slash, no /v1).
@@ -115,6 +130,8 @@ type Server struct {
 	reply    string
 	tool     string
 	toolArgs string
+
+	armedTool, armedArgs string
 
 	mu   sync.Mutex
 	reqs []Request
@@ -192,6 +209,13 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.reqs = append(s.reqs, req)
 	s.raw = append(s.raw, string(body))
+	tool, toolArgs := s.tool, s.toolArgs
+	callID := fmt.Sprintf("call_compat_%d", len(s.reqs))
+	call := tool != "" && !req.HasToolResult()
+	if s.armedTool != "" && !req.EndsWithToolResult() {
+		tool, toolArgs, call = s.armedTool, s.armedArgs, true
+		s.armedTool, s.armedArgs = "", ""
+	}
 	s.mu.Unlock()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -205,16 +229,16 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		"id": "chatcmpl-compat", "object": "chat.completion.chunk", "created": 1, "model": ModelID,
 		"choices": []any{}, "usage": map[string]any{"prompt_tokens": 120, "completion_tokens": 12, "total_tokens": 132},
 	}
-	if s.tool == "" || req.HasToolResult() {
+	if !call {
 		sseChunk(w, chunk(map[string]any{"role": "assistant", "content": s.reply}, nil))
 		sseChunk(w, chunk(map[string]any{}, "stop"))
 	} else {
 		sseChunk(w, chunk(map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{
-			keyIndex: 0, "id": "call_compat_1", "type": keyFunction,
-			keyFunction: map[string]any{"name": s.tool, "arguments": ""},
+			keyIndex: 0, "id": callID, "type": keyFunction,
+			keyFunction: map[string]any{"name": tool, "arguments": ""},
 		}}}, nil))
 		sseChunk(w, chunk(map[string]any{"tool_calls": []any{map[string]any{
-			keyIndex: 0, keyFunction: map[string]any{"arguments": s.toolArgs},
+			keyIndex: 0, keyFunction: map[string]any{"arguments": toolArgs},
 		}}}, nil))
 		sseChunk(w, chunk(map[string]any{}, "tool_calls"))
 	}

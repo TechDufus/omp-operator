@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -56,12 +57,15 @@ const (
 	wipSubject     = "omp-cloud: local changes at handoff"
 	localSubject   = "local unpushed commit"
 	dirtyReadme    = "# app\nline one\ndirty edit\n"
+	// cloudMaxSessions is limits.maxConcurrentSessions of the cloud agent below.
+	cloudMaxSessions = 4
 )
 
-// The cloud agent: the e2e image (driver + fakeomp + git), every built-in tool, two concurrent
-// sittings, a sitting that ends after the shortest idle time the API accepts, and the git server
-// below as the one git host, with push on. FAKEOMP_ECHO_ENV makes fakeomp leak the secret
-// env value into every reply so redaction can be checked.
+// The cloud agent: the e2e image (driver + fakeomp + git), every built-in tool, cloudMaxSessions
+// concurrent sittings (several threads run at once and each sitting idles a minute), a sitting
+// that ends after the shortest idle time the API accepts, a question timeout of the shortest
+// the API accepts, and the git server below as the one git host, with push on. FAKEOMP_ECHO_ENV
+// makes fakeomp leak the secret env value into every reply so redaction can be checked.
 const cloudAgentYAML = `apiVersion: omp.techdufus.com/v1alpha1
 kind: OmpAgent
 metadata:
@@ -74,10 +78,11 @@ spec:
     allow: ["*"]
   toolchain: {}
   limits:
-    maxConcurrentSessions: 2
+    maxConcurrentSessions: 4
     retryDelay: 30s
   cloud:
     idleTimeout: 1m
+    questionTimeout: 1m
     git:
       - host: ` + gitServerHost + `
         auth:
@@ -138,27 +143,51 @@ spec:
 
 // ---- the cloud API, as the owner's client sees it ----
 
+type apiQuestion struct {
+	ID         int      `json:"id"`
+	Text       string   `json:"text"`
+	Selected   []string `json:"selected"`
+	Answer     string   `json:"answer"`
+	AnsweredBy string   `json:"answeredBy"`
+	AnsweredAt string   `json:"answeredAt"`
+	Expired    bool     `json:"expired"`
+}
+
 type apiTurn struct {
-	ID           int    `json:"id"`
-	State        string `json:"state"`
-	Text         string `json:"text"`
-	By           string `json:"by"`
-	Reply        string `json:"reply"`
-	Title        string `json:"title"`
-	Error        string `json:"error"`
-	Head         string `json:"head"`
-	FilesChanged int    `json:"filesChanged"`
-	Pushed       bool   `json:"pushed"`
-	PushError    string `json:"pushError"`
+	ID           int           `json:"id"`
+	State        string        `json:"state"`
+	Text         string        `json:"text"`
+	By           string        `json:"by"`
+	Reply        string        `json:"reply"`
+	Title        string        `json:"title"`
+	Error        string        `json:"error"`
+	Head         string        `json:"head"`
+	FilesChanged int           `json:"filesChanged"`
+	Pushed       bool          `json:"pushed"`
+	PushError    string        `json:"pushError"`
+	Questions    []apiQuestion `json:"questions"`
+}
+
+// apiPendingQuestion is the thread summary's question: the oldest unanswered one.
+type apiPendingQuestion struct {
+	Turn    int    `json:"turn"`
+	ID      int    `json:"id"`
+	Text    string `json:"text"`
+	Options []struct {
+		Label       string `json:"label"`
+		Description string `json:"description"`
+	} `json:"options"`
+	Remaining int `json:"remaining"`
 }
 
 type apiThread struct {
-	Name          string    `json:"name"`
-	Agent         string    `json:"agent"`
-	Owner         string    `json:"owner"`
-	Phase         string    `json:"phase"`
-	ActiveSession string    `json:"activeSession"`
-	Turns         []apiTurn `json:"turns"`
+	Name          string              `json:"name"`
+	Agent         string              `json:"agent"`
+	Owner         string              `json:"owner"`
+	Phase         string              `json:"phase"`
+	ActiveSession string              `json:"activeSession"`
+	Question      *apiPendingQuestion `json:"question"`
+	Turns         []apiTurn           `json:"turns"`
 	Repo          struct {
 		BaseCommit    string `json:"baseCommit"`
 		HandoffCommit string `json:"handoffCommit"`
@@ -173,6 +202,37 @@ type apiThread struct {
 type apiEvent struct {
 	Kind string `json:"kind"`
 	Text string `json:"text"`
+}
+
+// whoAmIAgent is an agent of GET /api/v1/whoami with the capacity and thread counts.
+type whoAmIAgent struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Ready     bool   `json:"ready"`
+	Capacity  struct {
+		MaxConcurrentSessions int `json:"maxConcurrentSessions"`
+		Running               int `json:"running"`
+	} `json:"capacity"`
+	Threads struct {
+		Working int `json:"working"`
+		Waiting int `json:"waiting"`
+		Idle    int `json:"idle"`
+	} `json:"threads"`
+}
+
+type whoAmI struct {
+	User   string        `json:"user"`
+	Agents []whoAmIAgent `json:"agents"`
+}
+
+// agent returns the named agent of the e2e namespace, or nil.
+func (w whoAmI) agent(name string) *whoAmIAgent {
+	for i := range w.Agents {
+		if w.Agents[i].Name == name && w.Agents[i].Namespace == agentNS {
+			return &w.Agents[i]
+		}
+	}
+	return nil
 }
 
 type cloudAPI struct{ base string }
@@ -248,6 +308,32 @@ func (a cloudAPI) waitTurn(name string, id int, state string, timeout time.Durat
 		return turn.State
 	}, timeout, time.Second).Should(Equal(state), "turn %d of %s", id, name)
 	return got
+}
+
+// waitPhase waits for a thread to reach a phase; a failed turn fails the wait.
+func (a cloudAPI) waitPhase(name, phase string, timeout time.Duration) apiThread {
+	GinkgoHelper()
+	var got apiThread
+	Eventually(func() string {
+		got = a.thread(name)
+		for _, t := range got.Turns {
+			if t.State == "failed" {
+				StopTrying(fmt.Sprintf("turn %d of %s failed: %s", t.ID, name, t.Error)).Now()
+			}
+		}
+		return got.Phase
+	}, timeout, time.Second).Should(Equal(phase), "thread %s", name)
+	return got
+}
+
+// modelSaw reports whether some request to the local model ended with a message containing substr.
+func modelSaw(fp *fakeprovider.Server, substr string) bool {
+	for _, req := range fp.Requests() {
+		if len(req.Messages) > 0 && strings.Contains(req.Messages[len(req.Messages)-1].Text(), substr) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- the owner's omp ----
@@ -406,7 +492,8 @@ func startLocalOmp(ompBin, apiBase, gitBase, gitToken string, fp *fakeprovider.S
 	mustWrite(filepath.Join(l.repo, ".omp", "cloud.json"),
 		`{"secretFiles":[".env"],"secretEnv":["`+secretEnvName+`"]}`+"\n")
 
-	cmd := exec.Command(ompBin, "--mode", "rpc", "-e", filepath.Join(projectDir, "clients", "omp-cloud"))
+	cmd := exec.Command(ompBin, "--mode", "rpc", "--approval-mode", "yolo",
+		"-e", filepath.Join(projectDir, "clients", "omp-cloud"))
 	cmd.Dir = l.repo
 	cmd.Env = append(scrubbedEnv(), "HOME="+l.home, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0", "OMP_CLOUD_URL="+apiBase, "OMP_CLOUD_TOKEN="+cloudToken,
@@ -419,6 +506,61 @@ func startLocalOmp(ompBin, apiBase, gitBase, gitToken string, fp *fakeprovider.S
 	DeferCleanup(func() { _ = l.client.Close() })
 	go l.drain()
 	return l
+}
+
+// card is an omp-cloud card in the owner's transcript.
+type card struct {
+	Kind, Origin, Thread, Content string
+}
+
+// cards reads the cards from the owner's current session file.
+func (l *localOmp) cards() []card {
+	GinkgoHelper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	state, err := l.client.GetState(ctx)
+	Expect(err).NotTo(HaveOccurred())
+	if state.SessionFile == nil {
+		return nil
+	}
+	data, err := os.ReadFile(*state.SessionFile)
+	if err != nil {
+		return nil
+	}
+	var out []card
+	for line := range bytes.SplitSeq(data, []byte("\n")) {
+		var e struct {
+			Type       string `json:"type"`
+			CustomType string `json:"customType"`
+			Content    string `json:"content"`
+			Details    struct {
+				Kind   string `json:"kind"`
+				Origin string `json:"origin"`
+				Thread string `json:"thread"`
+			} `json:"details"`
+		}
+		if json.Unmarshal(line, &e) != nil || e.Type != "custom_message" || e.CustomType != "omp-cloud" {
+			continue
+		}
+		out = append(out, card{Kind: e.Details.Kind, Origin: e.Details.Origin, Thread: e.Details.Thread, Content: e.Content})
+	}
+	return out
+}
+
+// waitCard waits for a card of kind about thread in the owner's transcript.
+func (l *localOmp) waitCard(kind, thread string, timeout time.Duration) card {
+	GinkgoHelper()
+	var found card
+	Eventually(func() bool {
+		for _, c := range l.cards() {
+			if c.Kind == kind && c.Thread == thread {
+				found = c
+				return true
+			}
+		}
+		return false
+	}, timeout, time.Second).Should(BeTrue(), "no %s card for %s in the owner's transcript", kind, thread)
+	return found
 }
 
 // drain records the extension's notifications; it must run for omp to make progress.
@@ -713,23 +855,41 @@ var _ = Describe("cloud threads", Ordered, func() {
 		local.waitNote(since, "stopped "+hang+": running yes", false, time.Minute)
 		stopped := api.waitTurn(hang, 1, "failed", 3*time.Minute)
 		Expect(stopped.Error).To(ContainSubstring("stopped by token:e2e"))
+		// The live watcher reports the failed turn within one poll. It is an error notification and
+		// would otherwise land in the notification window of whatever spec comes next.
+		local.waitNote(since, hang+" turn 1 failed: stopped by token:e2e", true, time.Minute)
 
 		since = local.cloud("stop the flaky test")
 		hint := local.waitNote(since, "/cloud new", true, time.Minute)
 		Expect(hint).To(ContainSubstring(`no thread matches "the"`))
 	})
 
-	It("authenticates the cloud API", func() {
-		var who struct {
-			User   string `json:"user"`
-			Agents []struct {
-				Namespace, Name string
-				Ready           bool
-			} `json:"agents"`
-		}
+	It("authenticates the cloud API and reports capacity and thread counts", func() {
+		var who whoAmI
 		api.get("/api/v1/whoami", &who)
 		Expect(who.User).To(Equal("token:e2e"))
-		Expect(who.Agents).To(ContainElement(HaveField("Name", cloudAgent)))
+		agent := who.agent(cloudAgent)
+		Expect(agent).NotTo(BeNil())
+		Expect(agent.Ready).To(BeTrue())
+		Expect(agent.Capacity.MaxConcurrentSessions).To(Equal(cloudMaxSessions))
+		Expect(agent.Capacity.Running).To(And(BeNumerically(">=", 0), BeNumerically("<=", cloudMaxSessions)))
+		var listed struct {
+			Threads []struct {
+				Name  string `json:"name"`
+				Agent string `json:"agent"`
+			} `json:"threads"`
+		}
+		api.get("/api/v1/namespaces/"+agentNS+"/threads", &listed)
+		counts := agent.Threads
+		mine := 0
+		for _, t := range listed.Threads {
+			if t.Agent == cloudAgent {
+				mine++
+			}
+		}
+		Expect(counts.Working+counts.Waiting+counts.Idle).To(Equal(mine),
+			"whoami counts %+v, the list has %d threads of %s", counts, mine, cloudAgent)
+		Expect(counts.Idle).To(BeNumerically(">=", 1), "the handoff thread is idle")
 
 		code, body := api.call(http.MethodPost, "/api/v1/namespaces/"+agentNS+"/threads", viewerToken,
 			strings.NewReader("{}"), "application/json")
@@ -774,5 +934,160 @@ var _ = Describe("cloud threads", Ordered, func() {
 			}
 			return strings.Join(hits, "\n")
 		}, time.Minute, 2*time.Second).ShouldNot(BeEmpty())
+	})
+
+	// ---- questions and model delegation ----
+
+	askScript := func(extra map[string]any) string {
+		s := map[string]any{
+			"ask": map[string]any{"questions": []map[string]any{{
+				"id":       "db",
+				"question": "Which-database-should-the-service-use?",
+				"options":  []map[string]any{{"label": "Postgres", "description": "relational"}, {"label": "SQLite"}},
+			}}},
+			"reply": "asked",
+		}
+		maps.Copy(s, extra)
+		return script(s)
+	}
+	startedThread := func(since int) string {
+		GinkgoHelper()
+		started := local.waitNote(since, " started on e2e/"+cloudAgent, false, 3*time.Minute)
+		m := regexp.MustCompile(`^☁ (\S+) started on`).FindStringSubmatch(started)
+		Expect(m).NotTo(BeNil(), started)
+		return m[1]
+	}
+	var modelCallsBeforeQuestions int
+
+	It("round-trips a question from the cloud agent: Waiting, a card, /cloud answer, Idle", func() {
+		modelCallsBeforeQuestions = fp.Count()
+		since := local.cloud(askScript(nil))
+		asked := startedThread(since)
+
+		By("the thread goes Waiting with the question on the API and on the OmpThread status")
+		detail := api.waitPhase(asked, "Waiting", 4*time.Minute)
+		Expect(detail.Question).NotTo(BeNil())
+		Expect(detail.Question.Text).To(Equal("Which-database-should-the-service-use?"))
+		Expect(detail.Question.Turn).To(Equal(1))
+		Expect(detail.Question.Remaining).To(Equal(1))
+		Expect(detail.Question.Options).To(HaveLen(2))
+		Expect(detail.Question.Options[0].Label).To(Equal("Postgres"))
+		Expect(detail.Question.Options[0].Description).To(Equal("relational"))
+		Eventually(func() string { return str(get("ompthreads", asked), "status", "phase") }, time.Minute, time.Second).
+			Should(Equal("Waiting"))
+		Expect(str(get("ompthreads", asked), "status", "question", "text")).To(Equal(detail.Question.Text))
+
+		By("whoami counts the waiting thread and the running sitting")
+		var who whoAmI
+		api.get("/api/v1/whoami", &who)
+		agent := who.agent(cloudAgent)
+		Expect(agent).NotTo(BeNil())
+		Expect(agent.Capacity.MaxConcurrentSessions).To(Equal(cloudMaxSessions))
+		Expect(agent.Capacity.Running).To(And(BeNumerically(">=", 1), BeNumerically("<=", cloudMaxSessions)))
+		Expect(agent.Threads.Waiting).To(BeNumerically(">=", 1))
+
+		By("the local omp is told: a notification and a question card")
+		local.waitNote(since, "☁ "+asked+" asks: Which-database-should-the-service-use?", false, time.Minute)
+		qcard := local.waitCard("question", asked, time.Minute)
+		Expect(qcard.Origin).To(Equal("user"))
+		Expect(qcard.Content).To(And(HavePrefix("[cloud]"), ContainSubstring("Postgres")))
+
+		By("/cloud answer picks the option")
+		answerSince := local.cloud("answer " + asked + " Postgres")
+		local.waitNote(answerSince, "answered", false, time.Minute)
+
+		By("the turn finishes with the answer in fakeomp's reply and the thread returns to Idle")
+		done := api.waitTurn(asked, 1, "done", 3*time.Minute)
+		Expect(done.Reply).To(ContainSubstring("answers: db=Postgres"))
+		Expect(done.Questions).To(HaveLen(1))
+		Expect(done.Questions[0].Selected).To(Equal([]string{"Postgres"}))
+		Expect(done.Questions[0].AnsweredBy).To(Equal("token:e2e"))
+		Expect(done.Questions[0].Expired).To(BeFalse())
+		api.waitPhase(asked, "Idle", time.Minute)
+		Expect(api.thread(asked).Question).To(BeNil())
+		Eventually(func() string { return str(get("ompthreads", asked), "status", "phase") }, time.Minute, time.Second).
+			Should(Equal("Idle"))
+		Eventually(func() []string {
+			events := api.events(asked)
+			kinds := make([]string, 0, len(events))
+			for _, e := range events {
+				kinds = append(kinds, e.Kind)
+			}
+			return kinds
+		}, time.Minute, 2*time.Second).Should(ContainElements("question", "answer"))
+		Expect(api.thread(asked).turn(1).Questions[0].AnsweredAt).NotTo(BeEmpty())
+	})
+
+	It("tells the agent to continue when a question goes unanswered for the question timeout", func() {
+		since := local.cloud(askScript(nil))
+		lapsed := startedThread(since)
+		api.waitPhase(lapsed, "Waiting", 4*time.Minute)
+
+		// Nobody answers. The agent's questionTimeout is one minute.
+		done := api.waitTurn(lapsed, 1, "done", 5*time.Minute)
+		Expect(done.Reply).To(And(ContainSubstring("answers: db="),
+			ContainSubstring("No answer within 1m"), ContainSubstring("Continue with your best judgment")))
+		Expect(done.Questions).To(HaveLen(1))
+		Expect(done.Questions[0].Expired).To(BeTrue())
+		Expect(done.Questions[0].AnsweredBy).To(Equal("timeout"))
+		Expect(done.Questions[0].Selected).To(BeEmpty())
+		api.waitPhase(lapsed, "Idle", time.Minute)
+
+		// Cards of threads started with /cloud only display: they never woke the model.
+		Expect(fp.Count()).To(Equal(modelCallsBeforeQuestions),
+			"user-origin cards must not start a model turn; requests: %d", fp.Count())
+	})
+
+	It("lets the model delegate with the cloud tool, answer the question and hear back", func() {
+		task := askScript(map[string]any{
+			"files": map[string]string{"delegated.txt": "by the model\n"}, "reply": "delegated-done",
+		})
+		args, err := json.Marshal(map[string]any{"op": "delegate", "task": task})
+		Expect(err).NotTo(HaveOccurred())
+		fp.ArmToolCall("cloud", string(args))
+
+		By("the model calls the cloud tool and the thread is created")
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		defer cancel()
+		before := fp.Count()
+		_, err = local.client.PromptAndWait(ctx,
+			omprpc.PromptCommand{Message: "please delegate the database work to the cloud"}, 3*time.Minute)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fp.Count()).To(Equal(before+2), "the model's tool call, then its answer after the tool result")
+		reqs := fp.Requests()
+		last := reqs[len(reqs)-1]
+		Expect(last.EndsWithToolResult()).To(BeTrue())
+		result := last.Messages[len(last.Messages)-1].Text()
+		m := regexp.MustCompile(`Started cloud thread (\S+) on e2e/` + cloudAgent).FindStringSubmatch(result)
+		Expect(m).NotTo(BeNil(), "the tool result did not name the thread: %q", result)
+		delegated := m[1]
+		Expect(api.thread(delegated).Owner).To(Equal("token:e2e"))
+		Expect(api.thread(delegated).Turns).NotTo(BeEmpty())
+		launch := local.waitCard("launch", delegated, time.Minute)
+		Expect(launch.Origin).To(Equal("tool"), "the launch card records who started the thread")
+
+		By("the question card wakes the model, which answers through the cloud tool")
+		answerArgs, err := json.Marshal(map[string]any{"op": "answer", "thread": delegated, "selected": []string{"Postgres"}})
+		Expect(err).NotTo(HaveOccurred())
+		fp.ArmToolCall("cloud", string(answerArgs))
+		qcard := local.waitCard("question", delegated, 4*time.Minute)
+		Expect(qcard.Origin).To(Equal("tool"))
+		Eventually(func() bool { return modelSaw(fp, "[cloud] "+delegated+" is waiting for an answer") },
+			time.Minute, time.Second).Should(BeTrue(), "the question card did not start a model turn")
+
+		By("the cloud turn completes with the model's answer")
+		done := api.waitTurn(delegated, 1, "done", 4*time.Minute)
+		Expect(done.Reply).To(ContainSubstring("answers: db=Postgres"))
+		Expect(done.Questions).To(HaveLen(1))
+		Expect(done.Questions[0].AnsweredBy).To(Equal("token:e2e"))
+		Expect(done.Questions[0].Selected).To(Equal([]string{"Postgres"}))
+
+		By("the finished turn arrives as a [cloud] card and starts another model turn")
+		tcard := local.waitCard("turn", delegated, time.Minute)
+		Expect(tcard.Origin).To(Equal("tool"))
+		Expect(tcard.Content).To(HavePrefix("[cloud] " + delegated + " turn 1 done"))
+		Eventually(func() bool { return modelSaw(fp, "[cloud] "+delegated+" turn 1 done") },
+			time.Minute, time.Second).Should(BeTrue(), "the turn card did not start a model turn")
+		api.waitPhase(delegated, "Idle", time.Minute)
 	})
 })

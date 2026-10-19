@@ -188,6 +188,8 @@ type fakeCloudAPI struct {
 	parts map[string][]byte // part name -> content
 	names map[string]string // part name -> filename
 	auth  []string
+	// uploads holds every handoff in arrival order; parts, names and order keep only the latest.
+	uploads []upload
 }
 
 func newFakeCloudAPI(t *testing.T) *fakeCloudAPI {
@@ -270,10 +272,16 @@ func (f *fakeCloudAPI) capture(w http.ResponseWriter, r *http.Request) {
 		f.parts[part.FormName()] = data
 		f.names[part.FormName()] = part.FileName()
 	}
+	f.uploads = append(f.uploads, upload{
+		request: f.parts["request"], conversation: f.parts["conversation"], source: f.parts["source"],
+	})
 	resp := f.summary("Working")
 	resp["warnings"] = []string{}
 	writeJSON(w, http.StatusCreated, resp)
 }
+
+// upload is one captured handoff.
+type upload struct{ request, conversation, source []byte }
 
 // handedOff is what the fake cloud API received from one `/cloud` launch.
 type handedOff struct {
