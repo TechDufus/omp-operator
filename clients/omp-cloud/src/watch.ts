@@ -1,19 +1,22 @@
 import { shortName, VERBS, verbHelp } from "./commands";
-import type { Host, ThreadDetail, ThreadEvent, ThreadEvents, ThreadResult, ThreadSummary, ThreadTurn } from "./types";
+import { clip, firstLines } from "./format";
+import type {
+	Host,
+	PendingQuestion,
+	ThreadDetail,
+	ThreadEvent,
+	ThreadEvents,
+	ThreadResult,
+	ThreadSummary,
+	ThreadTurn,
+} from "./types";
 
 export const WIDGET_KEY = "omp-cloud";
 export const POLL_MS = 3000;
 export const DONE_WIDGET_MS = 10 * 60 * 1000;
 const MAX_FAILURES = 5;
-
-function clip(s: string, n: number): string {
-	const one = s.replace(/\s+/g, " ").trim();
-	return one.length > n ? `${one.slice(0, n - 1)}…` : one;
-}
-
-function firstLines(text: string | undefined, n: number): string[] {
-	return (text ?? "").trimEnd().split("\n").slice(0, n);
-}
+/** Events kept per watched thread: the live widget shows the last 10, a turn card up to 20. */
+const KEEP_EVENTS = 30;
 
 export function resultLine(r: ThreadResult | null | undefined): string {
 	if (!r) return "result: none yet";
@@ -29,6 +32,11 @@ export function listLines(threads: ThreadSummary[], max = 20): string[] {
 	return ["☁ cloud threads", ...lines];
 }
 
+function questionLine(q: PendingQuestion | null | undefined): string[] {
+	if (!q) return [];
+	return [`  ? ${clip(q.text, 160)}${q.remaining > 1 ? ` (+${q.remaining - 1} more)` : ""}`];
+}
+
 export function showLines(t: ThreadDetail, events: ThreadEvent[]): string[] {
 	const latest = [...t.turns].reverse().find(x => x.state === "done" || x.state === "failed");
 	const lines = [`☁ ${t.name} · ${t.phase || "-"} · ${t.turns.length} turns · ${t.agent} · ${t.model || "agent default"}`, `  ${t.title}`];
@@ -36,13 +44,15 @@ export function showLines(t: ThreadDetail, events: ThreadEvent[]): string[] {
 		lines.push(`  turn ${latest.id} ${latest.state}${latest.title ? `: ${latest.title}` : ""}`);
 		for (const l of firstLines(latest.state === "failed" ? latest.error : latest.reply, 12)) lines.push(`    ${l}`);
 	}
+	lines.push(...questionLine(t.question));
 	lines.push(`  ${resultLine(t.result)}`);
 	for (const e of events.slice(-8)) lines.push(`  ${e.kind}: ${clip(e.text, 120)}`);
 	return lines;
 }
 
-export function liveLines(t: Pick<ThreadDetail, "name" | "phase" | "turns">, activeTurn: number, events: ThreadEvent[]): string[] {
+export function liveLines(t: Pick<ThreadDetail, "name" | "phase" | "turns" | "question">, activeTurn: number, events: ThreadEvent[]): string[] {
 	const lines = [`☁ ${t.name} · ${t.phase || "-"} · turn ${activeTurn || t.turns.length}`];
+	if (t.question) lines.push(`? ${clip(t.question.text, 120)} — /cloud answer ${shortName(t.name)}`);
 	for (const e of events.slice(-10)) lines.push(`${e.kind}: ${clip(e.text, 120)}`);
 	return lines;
 }
@@ -56,11 +66,12 @@ export function doneLines(t: Pick<ThreadSummary, "name">, turn: ThreadTurn): str
 export function helpLines(): string[] {
 	const usage: Record<string, string> = {
 		new: "/cloud [new] <task>",
-		list: "/cloud [list]",
+		list: "/cloud list",
 		show: "/cloud show <id>",
 		watch: "/cloud watch <id>",
 		unwatch: "/cloud unwatch",
 		send: "/cloud send <id> <message>",
+		answer: "/cloud answer <id> [text]",
 		stop: "/cloud stop <id>",
 		pull: "/cloud pull <id>",
 		resume: "/cloud resume <id>",
@@ -68,11 +79,25 @@ export function helpLines(): string[] {
 		status: "/cloud status",
 		help: "/cloud help",
 	};
-	return ["☁ omp-cloud", ...VERBS.map(v => `${(usage[v] ?? v).padEnd(28)} ${verbHelp(v)}`)];
+	return ["☁ omp-cloud — /cloud with no arguments opens the hub", ...VERBS.map(v => `${(usage[v] ?? v).padEnd(28)} ${verbHelp(v)}`)];
+}
+
+/** Footer status text: `☁ 2 working · 1 waiting`; the waiting part only when something waits. */
+export function statusText(working: number, waiting: number): string | undefined {
+	if (working === 0 && waiting === 0) return undefined;
+	return waiting > 0 ? `☁ ${working} working · ${waiting} waiting` : `☁ ${working} working`;
 }
 
 function isActive(t: ThreadDetail): boolean {
-	return t.phase === "Working" || t.turns.some(x => x.state === "queued" || x.state === "running");
+	return t.phase === "Working" || t.phase === "Waiting" || t.turns.some(x => x.state === "queued" || x.state === "running");
+}
+
+/** Where finished turns and new questions go; the extension posts them as transcript cards. */
+export interface WatchSink {
+	turn(host: Host, thread: ThreadDetail, turn: ThreadTurn, events: ThreadEvent[]): void;
+	question(host: Host, thread: ThreadDetail, q: PendingQuestion): void;
+	/** Called every poll so held-back cards appear once the local agent is idle. */
+	flush?(host: Host): void;
 }
 
 export interface WatchApi {
@@ -86,18 +111,21 @@ interface Watched {
 	events: ThreadEvent[];
 	/** Turn ids whose completion was already reported. */
 	reported: Set<number>;
+	/** `<turn>:<question id>` of questions already announced. */
+	asked: Set<string>;
 	detail?: ThreadDetail;
 }
 
 /**
- * Polls watched threads every few seconds while any is working, keeps the
- * live `omp-cloud` widget and the footer status current, and reports each
- * finished turn once.
+ * Polls watched threads every few seconds while any is working or waiting, keeps the live
+ * `omp-cloud` widget and the footer status current, and reports each finished turn and each
+ * new question once.
  */
 export class Watcher {
 	#host: Host;
 	readonly #api: WatchApi;
 	readonly #ns: string;
+	readonly #sink: WatchSink | undefined;
 	readonly #watched = new Map<string, Watched>();
 	#timer: Timer | undefined;
 	#doneTimer: Timer | undefined;
@@ -105,21 +133,27 @@ export class Watcher {
 	#failures = 0;
 	#lastLines = "";
 
-	constructor(host: Host, api: WatchApi, ns: string) {
+	constructor(host: Host, api: WatchApi, ns: string, sink?: WatchSink) {
 		this.#host = host;
 		this.#api = api;
 		this.#ns = ns;
+		this.#sink = sink;
 	}
 
 	get watching(): string[] {
 		return [...this.#watched.keys()];
 	}
 
-	/** Point the watcher at a new session's host after `switchSession`. */
+	/**
+	 * Point the watcher at a new host: the one of the next command, or that of a new session after
+	 * `switchSession`. A switch already cleared the old interval, a new command did not; clearing it
+	 * again is harmless and stops intervals from piling up, one per command.
+	 */
 	rebind(host: Host): void {
 		this.#host = host;
 		if (this.#timer) {
-			this.#timer = undefined; // the old session's timers were cleared by the host
+			host.clearTimer(this.#timer);
+			this.#timer = undefined;
 			this.#armTimer();
 		}
 	}
@@ -135,13 +169,15 @@ export class Watcher {
 			name,
 			events: [],
 			reported: new Set(detail.turns.filter(t => t.state !== "queued" && t.state !== "running").map(t => t.id)),
+			asked: new Set(),
 			detail,
 		};
 		const ev = await this.#api.events(this.#ns, name).catch((): ThreadEvents => ({ session: "", events: [] }));
-		w.events = ev.events.slice(-10);
+		w.events = ev.events.slice(-KEEP_EVENTS);
 		w.since = ev.events.at(-1)?.at;
 		this.#watched.set(name, w);
 		this.#clearDoneTimer();
+		this.#announceQuestion(w, detail);
 		if (isActive(detail)) {
 			this.#renderThread(w);
 			this.#updateStatus();
@@ -197,8 +233,20 @@ export class Watcher {
 	}
 
 	#updateStatus(): void {
-		const k = [...this.#watched.values()].filter(w => w.detail && isActive(w.detail)).length;
-		this.#host.ui.setStatus(WIDGET_KEY, k > 0 ? `☁ ${k} working` : undefined);
+		const active = [...this.#watched.values()].filter(w => w.detail && isActive(w.detail));
+		const waiting = active.filter(w => w.detail?.phase === "Waiting").length;
+		this.#host.ui.setStatus(WIDGET_KEY, statusText(active.length - waiting, waiting));
+	}
+
+	/** One notification and one question card per question. */
+	#announceQuestion(w: Watched, detail: ThreadDetail): void {
+		const q = detail.question;
+		if (!q) return;
+		const key = `${q.turn}:${q.id}`;
+		if (w.asked.has(key)) return;
+		w.asked.add(key);
+		this.#host.ui.notify(`☁ ${w.name} asks: ${clip(q.text, 160)} — /cloud answer ${shortName(w.name)}`, "warning");
+		this.#sink?.question(this.#host, detail, q);
 	}
 
 	async #tick(): Promise<void> {
@@ -215,6 +263,7 @@ export class Watcher {
 		} finally {
 			this.#busy = false;
 		}
+		this.#sink?.flush?.(this.#host);
 		if (this.#watched.size === 0) this.#stopTimer();
 	}
 
@@ -222,9 +271,10 @@ export class Watcher {
 		const [detail, ev] = await Promise.all([this.#api.thread(this.#ns, w.name), this.#api.events(this.#ns, w.name, w.since)]);
 		w.detail = detail;
 		if (ev.events.length > 0) {
-			w.events = [...w.events, ...ev.events].slice(-10);
+			w.events = [...w.events, ...ev.events].slice(-KEEP_EVENTS);
 			w.since = ev.events.at(-1)?.at ?? w.since;
 		}
+		this.#announceQuestion(w, detail);
 		for (const turn of detail.turns) {
 			if ((turn.state !== "done" && turn.state !== "failed") || w.reported.has(turn.id)) continue;
 			w.reported.add(turn.id);
@@ -234,6 +284,7 @@ export class Watcher {
 				turn.state === "failed" ? "error" : "info",
 			);
 			this.#render(doneLines(detail, turn));
+			this.#sink?.turn(this.#host, detail, turn, w.events);
 			this.#clearDoneTimer();
 			this.#doneTimer = this.#host.setTimeout(() => {
 				this.#lastLines = "";

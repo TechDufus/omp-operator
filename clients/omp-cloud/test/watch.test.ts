@@ -141,6 +141,21 @@ describe("Watcher", () => {
 		expect(f.widgets.at(-1)?.join("\n")).toContain("all good");
 	});
 
+	test("rebinding to the next command's host replaces the interval instead of adding one", async () => {
+		const f = fakeHost();
+		const api: WatchApi = {
+			thread: async () => detail("Working", [turn(1, "running")]),
+			events: async () => ({ session: "", events: [] }),
+		};
+		const w = new Watcher(f.host, api, "omp-dev");
+		await w.watch("coder-k3x9fa");
+		expect([f.intervals, f.cleared]).toEqual([1, 0]);
+		w.rebind(f.host);
+		expect([f.intervals, f.cleared]).toEqual([2, 1]);
+		w.rebind(f.host);
+		expect([f.intervals, f.cleared]).toEqual([3, 2]);
+	});
+
 	test("repeated poll failures stop the watcher with one error", async () => {
 		const f = fakeHost();
 		let fail = false;

@@ -38,6 +38,15 @@ export interface Snapshot {
 	secretEnv: Record<string, string>;
 	paths: { home: string; workspace: string };
 	author: { name: string; email: string };
+	/** Commits the handoff carries beyond the remote's base (delta mode), or the whole history (full mode). */
+	commits: number;
+	/** What the work-in-progress commit adds on top of HEAD. */
+	wip: { files: number; insertions: number; deletions: number };
+	/** The first untracked files that ship (git does not ignore them); `untrackedTotal` counts all of them. */
+	untracked: string[];
+	untrackedTotal: number;
+	/** Credential-named files left out of the snapshot: they stay on this machine. */
+	withheld: string[];
 }
 
 export interface RemoteHost {
@@ -151,6 +160,82 @@ async function readSecretFiles(root: string, paths: string[]): Promise<{ path: s
 	return out;
 }
 
+// Basename patterns of files that hold credentials; see `isCredentialPath`.
+const CREDENTIAL_GLOBS = [
+	/^\.env$/,
+	/^\.env\..+$/,
+	/\.tfvars$/,
+	/\.tfvars\.json$/,
+	/\.tfstate$/,
+	/\.tfstate\..+$/,
+	/\.(pem|key|p12|pfx|jks|keystore)$/,
+	/^id_(rsa|dsa|ecdsa|ed25519)$/,
+	/^\.(netrc|npmrc|pypirc)$/,
+	/^kubeconfig$/,
+	/\.kubeconfig$/,
+	/^talosconfig$/,
+];
+const TEMPLATE_SUFFIX = /\.(example|sample|template)$/;
+/** How many untracked files a handoff card names. */
+export const UNTRACKED_LISTED = 10;
+
+/** Whether a path's basename looks like a credential file (`.env`, `*.pem`, `id_rsa`, `kubeconfig`, ...). */
+export function isCredentialPath(path: string): boolean {
+	const base = (path.split("/").pop() ?? path).toLowerCase();
+	if (/^\.env\./.test(base) && TEMPLATE_SUFFIX.test(base)) return false;
+	return CREDENTIAL_GLOBS.some(re => re.test(base));
+}
+
+/**
+ * Removes credential-named changes from the private index: tracked files keep their HEAD
+ * content, untracked ones are dropped. Returns the paths left out, which stay on this machine.
+ */
+async function withholdCredentials(root: string, indexEnv: Record<string, string>, allowed: ReadonlySet<string>): Promise<string[]> {
+	const changed = await git(root, ["diff", "--cached", "--name-status", "--no-renames", "-z", "HEAD"], { env: indexEnv });
+	const fields = changed.split("\0");
+	const restore: string[] = [];
+	const drop: string[] = [];
+	for (let i = 0; i + 1 < fields.length; i += 2) {
+		const status = fields[i] ?? "";
+		const path = fields[i + 1] ?? "";
+		if (!isCredentialPath(path) || allowed.has(path)) continue;
+		(status.startsWith("A") ? drop : restore).push(path);
+	}
+	if (restore.length > 0) {
+		const entries: string[] = [];
+		for (const p of restore) {
+			const r = await gitRaw(root, ["ls-tree", "-z", "HEAD", "--", p]);
+			const entry = r.stdout.replace(/\0$/, "");
+			if (entry) entries.push(entry.replace(/^(\d+) \w+ (\w+)\t/, "$1 $2\t"));
+		}
+		await git(root, ["update-index", "-z", "--index-info"], {
+			env: indexEnv,
+			input: `${entries.join("\0")}\0`,
+		});
+	}
+	if (drop.length > 0) {
+		await git(root, ["update-index", "--force-remove", "-z", "--stdin"], { env: indexEnv, input: `${drop.join("\0")}\0` });
+	}
+	return [...restore, ...drop].sort();
+}
+
+/** Untracked files git does not ignore, sorted. */
+async function listUntracked(root: string): Promise<string[]> {
+	const out = await git(root, ["ls-files", "--others", "--exclude-standard", "-z"]);
+	return out === "" ? [] : out.split("\0").filter(p => p !== "").sort();
+}
+
+/** Files and lines the WIP commit changes relative to HEAD. */
+async function wipStat(root: string, indexEnv: Record<string, string>): Promise<{ files: number; insertions: number; deletions: number }> {
+	const names = await git(root, ["diff", "--cached", "--name-only", "-z", "HEAD"], { env: indexEnv });
+	const short = await git(root, ["diff", "--cached", "--shortstat", "HEAD"], { env: indexEnv });
+	return {
+		files: names === "" ? 0 : names.split("\0").filter(p => p !== "").length,
+		insertions: Number(/(\d+) insertion/.exec(short)?.[1] ?? 0),
+		deletions: Number(/(\d+) deletion/.exec(short)?.[1] ?? 0),
+	};
+}
+
 /**
  * Captures the working tree for a handoff: the base commit on the remote, a
  * WIP commit holding every uncommitted change (tracked or not, never ignored
@@ -186,6 +271,9 @@ export async function takeSnapshot(opts: SnapshotOptions): Promise<Snapshot> {
 		}
 	}
 	const delta = baseCommit !== "";
+	const commits = Number(
+		await git(root, ["rev-list", "--count", delta ? `${baseCommit}..${head}` : head]),
+	);
 
 	const name = (await gitOpt(root, ["config", "user.name"])) || DEFAULT_AUTHOR.name;
 	const email = (await gitOpt(root, ["config", "user.email"])) || DEFAULT_AUTHOR.email;
@@ -194,7 +282,10 @@ export async function takeSnapshot(opts: SnapshotOptions): Promise<Snapshot> {
 	const indexEnv = { GIT_INDEX_FILE: join(opts.tmpDir, "index") };
 	await git(root, ["read-tree", "HEAD"], { env: indexEnv });
 	await git(root, ["add", "-A", "--", "."], { env: indexEnv });
+	const withheld = await withholdCredentials(root, indexEnv, new Set(opts.secretFiles));
+	const untracked = (await listUntracked(root)).filter(p => !withheld.includes(p));
 	const tree = await git(root, ["write-tree"], { env: indexEnv });
+	const wip = await wipStat(root, indexEnv);
 	let handoff = head;
 	if (tree !== (await git(root, ["rev-parse", "HEAD^{tree}"]))) {
 		handoff = await git(
@@ -245,5 +336,10 @@ export async function takeSnapshot(opts: SnapshotOptions): Promise<Snapshot> {
 		secretEnv,
 		paths: { home: opts.home, workspace: root },
 		author: { name, email },
+		commits,
+		wip,
+		untracked: untracked.slice(0, UNTRACKED_LISTED),
+		untrackedTotal: untracked.length,
+		withheld,
 	};
 }

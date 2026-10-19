@@ -7,6 +7,7 @@ export const VERBS = [
 	"watch",
 	"unwatch",
 	"send",
+	"answer",
 	"stop",
 	"pull",
 	"resume",
@@ -17,8 +18,8 @@ export const VERBS = [
 export type Verb = (typeof VERBS)[number];
 
 /** Verbs whose first argument names a thread. */
-export const ID_VERBS: readonly Verb[] = ["show", "watch", "send", "stop", "pull", "resume", "delete"];
-export type IdVerb = "show" | "watch" | "send" | "stop" | "pull" | "resume" | "delete";
+export const ID_VERBS: readonly Verb[] = ["show", "watch", "send", "answer", "stop", "pull", "resume", "delete"];
+export type IdVerb = "show" | "watch" | "send" | "answer" | "stop" | "pull" | "resume" | "delete";
 
 export const USAGE_LAUNCH = "☁ usage: /cloud <task for the cloud agent>";
 export const USAGE_SEND = "☁ usage: /cloud send <id> <message>";
@@ -26,15 +27,16 @@ export const USAGE_SEND = "☁ usage: /cloud send <id> <message>";
 /** What the user typed, before thread ids are resolved. */
 export type Parsed =
 	| { kind: "launch"; task: string }
-	| { kind: "list" | "unwatch" | "status" | "help" }
+	| { kind: "hub" | "list" | "unwatch" | "status" | "help" }
 	| { kind: IdVerb; token: string; text: string }
 	| { kind: "error"; message: string };
 
 /** A fully resolved command. */
 export type Command =
 	| { kind: "launch"; task: string }
-	| { kind: "list" | "unwatch" | "status" | "help" }
-	| { kind: Exclude<IdVerb, "send">; thread: string }
+	| { kind: "hub" | "list" | "unwatch" | "status" | "help" }
+	| { kind: Exclude<IdVerb, "send" | "answer">; thread: string }
+	| { kind: "answer"; thread: string; text: string }
 	| { kind: "send"; thread: string; text: string }
 	| { kind: "error"; message: string };
 
@@ -52,12 +54,12 @@ function splitFirst(s: string): [string, string] {
 }
 
 /**
- * The first token, lowercased, is a verb or the task starts here. Empty args
- * list; `new` launches the rest even when it begins with a verb word.
+ * The first token, lowercased, is a verb or the task starts here. Empty args open the hub;
+ * `new` launches the rest even when it begins with a verb word.
  */
 export function parseCommand(args: string): Parsed {
 	const trimmed = args.trim();
-	if (trimmed === "") return { kind: "list" };
+	if (trimmed === "") return { kind: "hub" };
 	const [first, rest] = splitFirst(trimmed);
 	const verb = first.toLowerCase();
 	if (!isVerb(verb)) return { kind: "launch", task: trimmed };
@@ -110,7 +112,7 @@ export function resolveCommand(parsed: Parsed, names: readonly string[]): Comman
 		}
 		return { kind: "error", message: hintForUnmatched(parsed.token, parsed.kind) };
 	}
-	if (parsed.kind === "send") return { kind: "send", thread: m.name, text: parsed.text };
+	if (parsed.kind === "send" || parsed.kind === "answer") return { kind: parsed.kind, thread: m.name, text: parsed.text };
 	return { kind: parsed.kind, thread: m.name };
 }
 
@@ -127,6 +129,7 @@ const VERB_HELP: Record<Verb, string> = {
 	watch: "watch a thread live",
 	unwatch: "stop the live widget",
 	send: "send a follow-up message to a thread",
+	answer: "answer the question a thread is waiting on",
 	stop: "stop the running turn and cancel queued ones",
 	pull: "fetch the thread's result branch",
 	resume: "continue the thread's conversation locally",

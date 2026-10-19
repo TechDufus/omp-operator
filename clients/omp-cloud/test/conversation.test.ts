@@ -111,3 +111,70 @@ describe("loadConversation", () => {
 		expect(r).toEqual({ kind: "too-large", bytes: MAX_CONVERSATION_BYTES + 1 });
 	});
 });
+
+describe("upload stripping", () => {
+	const header = JSON.stringify({ type: "session", version: 3, id: OLD_ID, cwd: "/work/app" });
+	const msg = (id: string, parentId: string | null, role: string, content: unknown = "x") =>
+		JSON.stringify({ type: "message", id, parentId, message: { role, content } });
+	const card = (id: string, parentId: string | null, customType = "omp-cloud") =>
+		JSON.stringify({ type: "custom_message", id, parentId, customType, content: "[cloud] x", display: true, details: { kind: "turn" } });
+	const build = (...lines: string[]) => Buffer.from(`${[header, ...lines].join("\n")}\n`);
+	const parse = (b: Buffer) =>
+		b
+			.toString("utf8")
+			.trimEnd()
+			.split("\n")
+			.map(l => JSON.parse(l) as { id?: string; parentId?: string | null; type: string; customType?: string });
+
+	test("drops cards and re-links their children to the nearest surviving ancestor", () => {
+		const keep = msg("e1", null, "user");
+		const other = card("k1", "e1", "something-else");
+		const out = rewriteConversation(
+			build(keep, card("c1", "e1"), card("c2", "c1"), msg("e2", "c2", "assistant"), card("c3", "e2"), msg("e3", "c3", "user"), other),
+			`/s/${TS}_${OLD_ID}.jsonl`,
+			"nid",
+		);
+		const entries = parse(out.data);
+		expect(entries.map(e => e.id)).toEqual(["nid", "e1", "e2", "e3", "k1"]);
+		expect(Object.fromEntries(entries.filter(e => e.id).map(e => [e.id, e.parentId]))).toEqual({ e1: null, e2: "e1", e3: "e2", k1: "e1" });
+		expect(out.droppedCards).toBe(3);
+		// Lines that need no change stay byte-identical.
+		const lines = out.data.toString("utf8").split("\n");
+		expect(lines).toContain(keep);
+		expect(lines).toContain(other);
+	});
+
+	test("text that merely mentions the card type is not a card", () => {
+		const chatter = msg("e1", null, "user", 'a custom_message with customType "omp-cloud"');
+		const out = rewriteConversation(build(chatter), "/s/x.jsonl", "nid");
+		expect(out.droppedCards).toBe(0);
+		expect(out.data.toString("utf8").split("\n")).toContain(chatter);
+	});
+
+	test("a conversation without cards is unchanged apart from the header", () => {
+		const body = [msg("e1", null, "user"), msg("e2", "e1", "assistant")];
+		const out = rewriteConversation(build(...body), "/s/x.jsonl", "nid");
+		expect(out.data.toString("utf8").split("\n").slice(1)).toEqual([...body, ""]);
+	});
+
+	test("a delegation cuts the assistant message with the pending tool call and everything after it", () => {
+		const call = (id: string) => msg("a1", "e1", "assistant", [{ type: "text", text: "delegating" }, { type: "toolCall", id, name: "cloud", arguments: { op: "delegate" } }]);
+		const earlier = msg("a0", null, "assistant", [{ type: "toolCall", id: "call_0", name: "read", arguments: {} }]);
+		const lines = [earlier, msg("e1", "a0", "user"), call("call_42"), msg("r1", "a1", "toolResult"), card("c1", "r1"), msg("e9", "c1", "user")];
+		const out = rewriteConversation(build(...lines), "/s/x.jsonl", "nid", { dropFromToolCall: "call_42" });
+		expect(parse(out.data).map(e => e.id)).toEqual(["nid", "a0", "e1"]);
+		expect(out.droppedForToolCall).toBe(4);
+
+		// The call's id must name a tool call of an assistant message: user text that repeats it is not cut.
+		const mention = msg("e1", null, "user", "call_42 is the id");
+		const kept = rewriteConversation(build(mention, msg("e2", "e1", "assistant")), "/s/x.jsonl", "nid", { dropFromToolCall: "call_42" });
+		expect(kept.droppedForToolCall).toBe(0);
+		expect(parse(kept.data).map(e => e.id)).toEqual(["nid", "e1", "e2"]);
+	});
+
+	test("blob references of cut content are not shipped", () => {
+		const withBlob = msg("a1", "e1", "assistant", [{ type: "toolCall", id: "call_7", name: "cloud", arguments: { img: `blob:sha256:${HASH}` } }]);
+		const out = rewriteConversation(build(msg("e1", null, "user"), withBlob), "/s/x.jsonl", "nid", { dropFromToolCall: "call_7" });
+		expect(out.blobHashes).toEqual([]);
+	});
+});

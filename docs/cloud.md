@@ -7,6 +7,11 @@ works in a pod while you do something else, commits to a branch `omp-cloud/<thre
 back (or fetch it from your Git host, when the agent pushes) and, if you want, `/cloud resume` the conversation
 locally.
 
+Cloud work stays visible and steerable without attaching. Each handoff, finished turn and question becomes a
+[card](#cards) in your conversation; `/cloud` opens a [hub](#the-hub) over all your threads; the agent's questions
+reach you and your model ([questions](#questions)); and your model can delegate on its own with the
+[`cloud` tool](#the-cloud-tool).
+
 Three parts work together:
 
 | Part | What it is |
@@ -39,9 +44,10 @@ serve, and the `default` role, point at the thread's model; the thread's thinkin
 uses the roles a plain session of the agent would have.
 
 The system prompt gets a *Running in the cloud* section: the repository, the checkout path, the result branch and the
-branch it was based on; work autonomously and ask in the reply when a decision is needed; commit as you go,
-anything uncommitted is committed at the end of the turn; do not push or change remotes; the shipped secret files must
-never be printed or committed.
+branch it was based on; use the `ask` tool for decisions that block the work (you may answer late; after
+`cloud.questionTimeout` it is told to proceed on its best judgment); commit as you go, anything uncommitted is
+committed at the end of the turn; do not push or change remotes; the shipped secret files must never be printed or
+committed.
 
 ## Quick start
 
@@ -123,8 +129,10 @@ What else shapes a cloud agent:
   needs. Left unset, the default set applies (`read, grep, glob, bash, todo`); `*` cannot be combined with other
   entries.
 - **`toolchain: {}`** caches the tools in the repository's `mise.toml`: the first sitting of an agent for a given
-  `mise.toml` runs `mise install`, later ones restore it from the operator (the newest 8 per agent are kept). Without
-  `toolchain` nothing is installed. The agent's own stored toolchain sync is not used by cloud sittings.
+  `mise.toml` runs `mise install`, later ones restore it from the operator (the newest 8 per agent are kept). A partial
+  install is cached too, and after every restore `mise install` runs again so missing tools are retried and the
+  cache heals. Without `toolchain` nothing is installed. The agent's own stored toolchain sync is not used by cloud
+  sittings.
 - **`limits.sessionTimeout`** (default `30m`) is the time limit of one *turn*. **`limits.maxConcurrentSessions`**
   (default 1, at most 20) is how many sittings of the agent run at once; sittings of one thread never overlap. Give
   a cloud agent more than 1 if you hand off several tasks at a time.
@@ -252,11 +260,11 @@ Values are redacted in everything the pod reports. See [security](security.md#cl
 | Item | Detail |
 |---|---|
 | Repository | Your state as a git bundle, uploaded as a *delta* or in *full* mode, below |
-| Uncommitted work | Recorded as one extra commit, `omp-cloud: local changes at handoff`, holding every tracked change and every untracked file that git does not ignore. Made with a private index, so your index, branch and working tree are untouched |
+| Uncommitted work | Recorded as one extra commit, `omp-cloud: local changes at handoff`, holding every tracked change and every untracked file that git does not ignore, except [credential-named files](#what-stays-on-your-machine). Made with a private index, so your index, branch and working tree are untouched |
 | Model, thinking level | `provider/id` of the current model and the thinking level of your session |
 | Paths, git identity | Your `$HOME` and repository root, and `user.name`/`user.email` (default `omp-cloud`/`omp-cloud@localhost`) |
 | Secrets | `secretFiles` and `secretEnv`, [above](#secrets) |
-| Conversation | The current session file (at most 64 MiB; larger is skipped with a warning and the agent starts without it). Only its header line changes: a new session id and `parentSession` pointing at your file, so the cloud and local sessions never share an id. A session not yet written to disk has no conversation |
+| Conversation | The current session file (at most 64 MiB; larger is skipped with a warning and the agent starts without it). The header line gets a new session id and `parentSession` pointing at your file, so the cloud and local sessions never share an id; [cards](#cards) are removed (children re-linked) and, for a delegation by the `cloud` tool, the assistant message carrying the pending call and everything after it. Other lines stay byte-identical. A session not yet written to disk has no conversation |
 | Setup | `AGENTS.md`, `RULES.md`, `skills/`, and per `ship.*`: `config.yml`, `extensions/` and `memories/mnemopi/` (SQLite databases are written as consistent snapshots), plus the blobs the conversation references. Symlinks are followed. At most 64 MiB. Nothing else from `~/.omp/agent` is shipped |
 
 **Delta mode** is used when all hold: `forceBundle` is off; the current branch has an upstream (else the remote
@@ -282,17 +290,19 @@ is streaming. The first word, case-insensitive, selects a verb; anything else is
 
 | Command | Behaviour |
 |---|---|
-| `/cloud <task>`, `/cloud new <task>` | Hand off. `new` launches the rest as the task even when it starts with a verb word (`/cloud new stop the flaky test`). Notifies `☁ Handing off to the cloud…`, uploads in the background (launches are serialized per repository), then `☁ <thread> started on <ns>/<agent> — /cloud watch <id>`, one warning per warning from the API, and, when the local agent is idle, a note in the local conversation (no model turn). Starts watching |
-| `/cloud`, `/cloud list` | Widget listing up to 20 threads of the namespace: `<id> <phase> t<turns> <latest state> <title>` |
-| `/cloud show <id>` | Widget with the header, the first 12 lines of the latest reply (or error), the result line and the last 8 events |
-| `/cloud watch <id>` | Live widget `omp-cloud` above the editor: header and the last 10 events, refreshed every 3 s while the thread works, plus a footer status `☁ <k> working`. Each finished turn is notified (`☁ <thread> turn <n> done: <title>`, an error when failed), then the widget shows the first 8 lines of the reply and `/cloud pull <id>`, and clears after 10 minutes. An idle thread is shown once. Polling stops after 5 consecutive failures |
+| `/cloud` | Opens the [hub](#the-hub), an overlay with the agents, the threads and live detail. Without an overlay-capable UI (RPC, a terminal host without overlays) it posts an [inventory card](#cards) |
+| `/cloud <task>`, `/cloud new <task>` | Hand off. `new` launches the rest as the task even when it starts with a verb word (`/cloud new stop the flaky test`). Notifies `☁ Handing off to the cloud…`, uploads in the background (launches are serialized per repository), then `☁ <thread> started on <ns>/<agent> — /cloud watch <id>`, one warning per warning from the API, and a [launch card](#cards) in the conversation (no model turn). Starts watching |
+| `/cloud list` | Widget listing up to 20 threads of the namespace: `<id> <phase> t<turns> <latest state> <title>` |
+| `/cloud show <id>` | Widget with the header, the first 12 lines of the latest reply (or error), the pending question, the result line and the last 8 events |
+| `/cloud watch <id>` | Live widget `omp-cloud` above the editor: header, a pending question and the last 10 events, refreshed every 3 s while the thread works or waits, plus a footer status `☁ <k> working` (`☁ <k> working · <m> waiting` when a thread waits). Each finished turn is notified (`☁ <thread> turn <n> done: <title>`, an error when failed) and becomes a [turn card](#cards); each new question is notified and becomes a [question card](#cards). The widget then shows the first 8 lines of the reply and `/cloud pull <id>`, and clears after 10 minutes. An idle thread is shown once. Polling stops after 5 consecutive failures |
 | `/cloud unwatch` | Stop the live widget |
 | `/cloud send <id> <message>` | Queue a follow-up turn (at most 32 KiB; a thread holds 200 turns), then watch |
+| `/cloud answer <id> [text]` | Answer the question the thread waits on, [below](#questions) |
 | `/cloud stop <id>` | Abort the running turn and cancel queued ones: `☁ stopped <thread>: running yes, cancelled <n>` |
 | `/cloud pull <id>` | Bring the result branch into your repository, [below](#getting-results-back) |
 | `/cloud resume <id>` | Continue the thread locally, [below](#getting-results-back) |
 | `/cloud delete <id>` | After a confirmation, delete the thread and everything stored for it |
-| `/cloud status` | Config files read, URL, user and the agents you may hand off to |
+| `/cloud status` | Config files read, URL, user and the agents you may hand off to, with their running sessions |
 | `/cloud help` | One usage line per verb |
 
 `<id>` is the full thread name, its last 6 characters (as printed after `/cloud watch`), or a unique name prefix. A
@@ -301,12 +311,127 @@ verb that takes an id and finds none says `☁ no thread matches "<token>"; to s
 `list`, handoffs and id verbs refresh; it never calls the network. Attached images are not sent: slash commands
 receive text only.
 
+## Cards
+
+Everything you would want to know about a thread shows up in your local conversation as a *card*: a transcript
+entry of type `omp-cloud`. omp draws the card from structured data with its terminal components (sections,
+key/value rows, metric rows, Markdown, a collapsible event list); the model sees a compact text version that starts
+with `[cloud]`.
+
+| Card | Posted when | What it shows |
+|---|---|---|
+| Launch | A handoff succeeded | Thread, agent, model and thinking level; repository, base and result branch; commits and changed files shipped; the first 10 untracked files (`and N more`); the files [left on your machine](#what-stays-on-your-machine); secret files and variables, conversation and setup sizes; warnings |
+| Turn | A turn finished | `✓`/`✗`, thread, turn, duration, model, cost; `+ins −del · files · pushed or push error · branch`; the reply as Markdown; the events in a collapsed list (expand the message to read them); hints for `pull`, `send` and `resume` |
+| Question | The cloud agent asked | Thread, turn, the question, its options with descriptions, the recommended one, and how to answer |
+| Inventory | `/cloud` without an overlay UI | Agents with capacity and the namespace's threads |
+
+- **What the model sees.** `[cloud] <thread> turn 2 done: <title>`, the diffstat, the branch and head, and the reply
+  cut to 1500 characters (the card shows up to 8000). A launch says what was shipped and what stayed, and that results
+  arrive later.
+- **Plain fallback.** If omp's terminal components cannot be loaded, or a card fails to draw, it is drawn as plain
+  wrapped text with the same content.
+- **Delivery.** Threads you start with `/cloud` only *display* their cards: an idle conversation shows them at once
+  without a model turn; a busy one shows them when the agent ends. Threads the model starts with the
+  [`cloud` tool](#the-cloud-tool) wake it: a turn and question card starts a model turn when the conversation is idle
+  and joins the running turn at its next step boundary otherwise. That origin is stored in the launch card, so it
+  survives restarting omp or resuming the session.
+- **Not uploaded.** Cards are removed from the conversation a later handoff ships, and their children re-linked, so a
+  cloud agent never reads its own earlier reports as part of your conversation.
+
+## The hub
+
+`/cloud` with no arguments opens an overlay in the terminal UI. It polls every 3 seconds.
+
+- **Agents** of the namespace with their readiness, running sessions of the maximum, and how many threads work, wait
+  and idle.
+- **Threads**, newest first: phase icon (`●` working, `?` waiting on you, `○` idle), id, phase, turns, latest turn
+  state, `+/−` of the result, age and title.
+- **The selected thread**: its pending question with the options, the first lines of the latest reply, and the live
+  events.
+
+| Key | Action |
+|---|---|
+| `↑` `↓` (`k` `j`) | Select a thread |
+| `s` | Send a message (prompts for the text) |
+| `a` | Answer the pending question (prompts) |
+| `x` | Stop, after a confirmation |
+| `p` | Pull the result branch |
+| `r` | Resume the thread locally; closes the hub |
+| `d` | Delete, after a confirmation |
+| `q`, `Esc` | Close |
+
+An action closes the overlay, runs, reports with a notification, and reopens the hub.
+
+## Questions
+
+The cloud agent asks you with omp's `ask` tool when a decision blocks its work. The turn keeps running, the thread
+phase becomes `Waiting`, and you see the question:
+
+- as a notification `☁ <thread> asks: <question> — /cloud answer <id>` and a [question card](#cards), once per
+  question;
+- in the footer: `☁ 1 working · 1 waiting`;
+- in the hub, on the thread and in its detail;
+- in the model's context, as the card's `[cloud]` text, so a model that started the thread can answer through the
+  [`cloud` tool](#the-cloud-tool).
+
+Answer with `/cloud answer <id> [text]`:
+
+- **With text**: a text equal to an option label (ignoring case) selects that option; for a multiple-choice question a
+  comma-separated list of labels selects them all; anything else is a free-text answer. Free text is always allowed.
+- **Without text**: a picker lists the options (the recommended one marked) and `Other (type your own)`; multiple
+  choice repeats until `Done`. Cancel to leave the question open.
+
+Several questions from one `ask` call are answered in order, oldest first. Answering resumes the turn.
+
+**No answer in time.** After `cloud.questionTimeout` (default `30m`, set on the agent) the agent is told "No answer
+within <timeout>. Continue with your best judgment" and carries on, saying in its reply what it assumed. The question
+is marked as expired on the turn. Time spent waiting does not count against `limits.sessionTimeout`. Stopping the
+thread expires its open questions too.
+
+## The `cloud` tool
+
+The extension also gives your local model a tool named `cloud` (`cloud_agent` if another tool has the name), so it can
+delegate work to a cloud agent and manage the threads it started, without you typing `/cloud`. The tool's description
+tells the model when to delegate (work that is independent of your machine and long-running or parallel), to check
+capacity first, that results come back as `[cloud]` messages, and not to poll.
+
+| `op` | Arguments | Does | Approval tier |
+|---|---|---|---|
+| `delegate` | `task`, `agent?` | Ships the repository, the conversation and your setup like `/cloud <task>`; returns the thread, agent and warnings | `exec` |
+| `list` | | Agents with capacity (running sessions of the maximum; threads working, waiting, idle) and recent threads | `read` |
+| `status` | `thread` | Phase, the last 3 turns with replies up to 1500 characters, the pending question and the result | `read` |
+| `send` | `thread`, `text` | Queues a follow-up turn | `write` |
+| `answer` | `thread`, `selected?`, `answer?` | Answers the pending question: option labels and/or free text | `write` |
+| `stop` | `thread` | Aborts the running turn and cancels queued ones | `write` |
+| `pull` | `thread` | Fetches the result branch into your repository (the working tree is not touched) | `write` |
+
+Approval follows omp's tool approval mode (`tools.approvalMode`, `tools.approval.cloud`): `read` calls always run;
+`always-ask` prompts for `write` and `exec` calls, `write` mode only for `exec` (`delegate`), and `yolo` (the default)
+for nothing. A model-started delegation cuts its own pending `cloud` call out of the uploaded conversation, so the
+cloud agent never sees a tool call without a result.
+
+## What stays on your machine
+
+- **Credential-named files.** The work-in-progress snapshot leaves out files whose name looks like a credential:
+  `.env`, `.env.*` (not `*.example`, `*.sample`, `*.template`), `*.tfvars`, `*.tfvars.json`, `*.tfstate`,
+  `*.tfstate.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `id_rsa`, `id_dsa`, `id_ecdsa`,
+  `id_ed25519`, `.netrc`, `.npmrc`, `.pypirc`, `kubeconfig`, `*.kubeconfig` and `talosconfig`. An untracked one is
+  skipped; a tracked one keeps the content of your last commit, so uncommitted edits to it are not shipped. Committed
+  history is shipped as it is. The launch card and the model-visible text list what was left out. Files you list in
+  `secretFiles` follow the [secrets rules](#secrets) instead.
+- **Everything git ignores**, unless listed in `secretFiles`.
+- **Environment variables** you did not list in `secretEnv`.
+- **The extension itself**, and any extension you put in `excludeExtensions`.
+- **Untracked files that are not credential-named do ship.** The launch card names the first 10; check them before
+  you hand off if the directory holds scratch files.
+
 ## Lifecycle
 
 - **Thread.** The handoff creates an `OmpThread` named `<agent>-<6 random characters>` and queues your task as
   turn 1. Each `/cloud send` queues another turn. A turn is `queued`, `running`, `done`, `failed` or `cancelled`.
-  `kubectl get ompthread` shows phase (`Working` while a turn is queued or running, else `Idle`), turn count and the
-  latest turn; the dashboard has a page per thread (`/threads/<ns>/<name>`).
+  `kubectl get ompthread` shows phase (`Waiting` while a running turn has an unanswered question, `Working` while a
+  turn is queued or running, else `Idle`), turn count and the latest turn; the dashboard has a page per thread
+  (`/threads/<ns>/<name>`).
 - **Sitting.** When a turn is queued and no sitting is active, the operator starts a sitting, an `OmpSession`
   `<thread>-<n>` with `kind=cloud` that runs one pod. It waits in the agent's queue if the agent is at
   `maxConcurrentSessions`. The pod's omp serves the thread's turns one after another.
@@ -355,9 +480,9 @@ Local and cloud copies diverge from the moment of handoff: your local session co
 
 ## Limits
 
-- **Autonomous.** In v0.2 a cloud agent runs without anyone attached. It cannot ask you a question mid-turn; it ends
-  its turn and asks in the reply, and you answer with `/cloud send`. Attaching to a running agent and chatting with it
-  directly are planned for v0.3.
+- **Questions need you or your model.** A cloud agent runs without anyone attached. When it needs a decision it asks
+  with omp's `ask` tool and carries on after `cloud.questionTimeout` with its best judgment; see
+  [Questions](#questions). Attaching to a running agent and chatting with it directly are planned for v0.3.
 - **Text only.** Images attached to the command are not sent.
 - **Sizes.** Repository bundle: the smaller of `maxUploadMB` (512) and `cloud.maxUploadBytes` (1 GiB); conversation
   64 MiB; setup 64 MiB (a shipped setup expands to at most 512 MiB in the pod); result bundle 1 GiB; messages 32 KiB;
@@ -390,6 +515,9 @@ Local and cloud copies diverge from the moment of handoff: your local session co
 | `507 insufficient storage on the operator data volume` | The data volume has less than twice the upload free; see [install](install.md#storage) |
 | `your repository lacks the thread's base commit` on pull | `git fetch <remote>`, then retry |
 | `409` on a message: `thread has 200 turns; start a new one` | Hand off again, or `/cloud resume` and continue locally |
+| `☁ <thread> has no question waiting` | The question was already answered, expired, or the turn ended. `/cloud show <id>` shows the thread |
+| `409 question is not waiting for an answer` on an answer | Someone else answered first, or the question timed out; the answer is recorded on the turn |
+| Cards show as plain text, or `/cloud` posts an inventory card instead of the hub | omp's terminal UI library could not be loaded by the extension, or the UI cannot show overlays (RPC, a host without them). The plain card and the inventory card carry the same information |
 
 The dashboard page `/threads/<namespace>/<name>` shows the turns, the result and the last 100 events of the newest
 sitting. Metrics: `omp_operator_thread_turns_total`, `omp_operator_threads` ([metrics](metrics.md)).

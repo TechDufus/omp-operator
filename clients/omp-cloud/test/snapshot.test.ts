@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { git, gitRaw, parseRemote, takeSnapshot, type SnapshotOptions } from "../src/snapshot";
+import { git, gitRaw, isCredentialPath, parseRemote, takeSnapshot, type SnapshotOptions } from "../src/snapshot";
 import { cleanup, commitFile, configureRepo, remoteFixture, REMOTE_URL, tmp } from "./helpers";
 
 afterEach(cleanup);
@@ -207,5 +207,91 @@ describe("takeSnapshot", () => {
 		await expect(takeSnapshot(await opts(dir, { maxBytes: 10 }))).rejects.toThrow(
 			/^repository bundle is [\d.]+ MB, over the [\d.]+ MB upload limit$/,
 		);
+	});
+});
+
+describe("credential-named files", () => {
+	const cases: [string, boolean][] = [
+		[".env", true],
+		[".env.local", true],
+		[".env.production", true],
+		[".env.example", false],
+		[".env.sample", false],
+		[".env.template", false],
+		["infra/prod.tfvars", true],
+		["infra/prod.tfvars.json", true],
+		["terraform.tfstate", true],
+		["terraform.tfstate.backup", true],
+		["certs/server.pem", true],
+		["certs/server.key", true],
+		["a.p12", true],
+		["a.pfx", true],
+		["a.jks", true],
+		["a.keystore", true],
+		["home/.ssh/id_rsa", true],
+		["id_dsa", true],
+		["id_ecdsa", true],
+		["id_ed25519", true],
+		["id_ed25519.pub", false],
+		[".netrc", true],
+		[".npmrc", true],
+		[".pypirc", true],
+		["kubeconfig", true],
+		["clusters/dev.kubeconfig", true],
+		["talosconfig", true],
+		["environment.ts", false],
+		["README.md", false],
+		["src/keyboard.ts", false],
+	];
+	for (const [path, want] of cases) {
+		test(`${path} -> ${want ? "withheld" : "shipped"}`, () => expect(isCredentialPath(path)).toBe(want));
+	}
+
+	test("untracked ones are skipped, tracked ones keep their HEAD content, the rest ships; all are reported", async () => {
+		const f = await remoteFixture();
+		await commitFile(f.work, ".npmrc", "registry=https://registry.example.test\n");
+		await git(f.work, ["push", "-q", "origin", "main"]);
+		const base = await git(f.work, ["rev-parse", "HEAD"]);
+		await writeFile(join(f.work, ".npmrc"), "//registry.example.test/:_authToken=npm_secret_value\n");
+		await writeFile(join(f.work, ".env.local"), "TOKEN=local-secret\n");
+		await mkdir(join(f.work, "certs"), { recursive: true });
+		await writeFile(join(f.work, "certs", "server.pem"), "-----BEGIN PRIVATE KEY-----\n");
+		await writeFile(join(f.work, ".env.example"), "TOKEN=\n");
+		await writeFile(join(f.work, "notes.txt"), "shipped\n");
+
+		const snap = await takeSnapshot(await opts(f.work));
+		expect(snap.baseCommit).toBe(base);
+		expect(snap.withheld).toEqual([".env.local", ".npmrc", "certs/server.pem"]);
+		expect(snap.untracked).toEqual([".env.example", "notes.txt"]);
+		expect(snap.untrackedTotal).toBe(2);
+		expect(snap.wip).toEqual({ files: 2, insertions: 2, deletions: 0 });
+		expect(snap.commits).toBe(0);
+
+		const tree = await git(f.work, ["ls-tree", "-r", "--name-only", snap.handoffCommit]);
+		expect(tree.split("\n")).toEqual([".env.example", ".gitignore", ".npmrc", "a.txt", "notes.txt"]);
+		expect(await git(f.work, ["show", `${snap.handoffCommit}:.npmrc`])).toBe("registry=https://registry.example.test");
+		// Nothing was removed from the user's working tree.
+		expect((await gitRaw(f.work, ["status", "--porcelain", "--untracked-files=all"])).stdout).toContain("?? .env.local");
+	});
+
+	test("a gitignored credential file listed in secretFiles ships as a secret and is not reported as withheld; an unlisted untracked one is", async () => {
+		const f = await remoteFixture();
+		await writeFile(join(f.work, ".gitignore"), ".env\n.env.local\n");
+		await writeFile(join(f.work, ".env.local"), "TOKEN=x\n");
+		await writeFile(join(f.work, ".env.production"), "TOKEN=y\n");
+		const snap = await takeSnapshot(await opts(f.work, { secretFiles: [".env.local"] }));
+		expect(snap.secretFiles.map(s => s.path)).toEqual([".env.local"]);
+		expect(snap.withheld).toEqual([".env.production"]);
+		expect(await git(f.work, ["ls-tree", "-r", "--name-only", snap.handoffCommit])).not.toContain(".env.");
+	});
+
+	test("the untracked listing is capped at 10 names but counts them all", async () => {
+		const f = await remoteFixture();
+		for (let i = 0; i < 13; i++) await writeFile(join(f.work, `u${String(i).padStart(2, "0")}.txt`), "x\n");
+		const snap = await takeSnapshot(await opts(f.work));
+		expect(snap.untracked).toHaveLength(10);
+		expect(snap.untrackedTotal).toBe(13);
+		expect(snap.untracked[0]).toBe("u00.txt");
+		expect(snap.wip.files).toBe(13);
 	});
 });

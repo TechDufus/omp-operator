@@ -20,12 +20,30 @@ export interface LaunchInput {
 	agentDir: string;
 	/** This extension's own directory; excluded from the shipped setup. */
 	ownRoot: string;
+	/** Set when the local model delegated through the `cloud` tool: its pending call is cut from the uploaded conversation. */
+	toolCallId?: string;
+}
+
+/** What a handoff shipped, for the launch card. */
+export interface HandoffSummary {
+	repo: { name: string; mode: "delta" | "full"; baseRef: string; baseCommit: string; localBranch: string };
+	commits: number;
+	wip: { files: number; insertions: number; deletions: number };
+	untracked: string[];
+	untrackedTotal: number;
+	withheld: string[];
+	secrets: { files: number; env: number };
+	conversation: "included" | "none" | "too-large";
+	setupBytes: number;
+	model: string;
+	thinking: string;
 }
 
 export interface LaunchResult {
 	response: HandoffResponse;
 	/** Local warnings (conversation too large, memory copied without a snapshot). */
 	warnings: string[];
+	summary: HandoffSummary;
 }
 
 /**
@@ -51,7 +69,7 @@ export async function launchHandoff(input: LaunchInput): Promise<LaunchResult> {
 		});
 
 		const warnings: string[] = [];
-		const conv = await loadConversation(host.sessionManager.getSessionFile());
+		const conv = await loadConversation(host.sessionManager.getSessionFile(), { dropFromToolCall: input.toolCallId });
 		if (conv.kind === "too-large") {
 			warnings.push(`conversation is over ${MAX_CONVERSATION_BYTES / (1024 * 1024)} MiB; the cloud agent starts without it`);
 		}
@@ -93,7 +111,26 @@ export async function launchHandoff(input: LaunchInput): Promise<LaunchResult> {
 			conversation: conv.kind === "ok" ? { filename: conv.filename, data: conv.data } : undefined,
 			setup: setup.path,
 		});
-		return { response, warnings };
+		const summary: HandoffSummary = {
+			repo: {
+				name: snap.name,
+				mode: snap.mode,
+				baseRef: snap.baseRef,
+				baseCommit: snap.baseCommit,
+				localBranch: snap.localBranch,
+			},
+			commits: snap.commits,
+			wip: snap.wip,
+			untracked: snap.untracked,
+			untrackedTotal: snap.untrackedTotal,
+			withheld: snap.withheld,
+			secrets: { files: snap.secretFiles.length, env: Object.keys(snap.secretEnv).length },
+			conversation: conv.kind === "ok" ? "included" : conv.kind === "too-large" ? "too-large" : "none",
+			setupBytes: setup.bytes,
+			model: request.model ?? "",
+			thinking: request.thinking ?? "",
+		};
+		return { response, warnings, summary };
 	} finally {
 		await rm(tmp, { recursive: true, force: true });
 	}

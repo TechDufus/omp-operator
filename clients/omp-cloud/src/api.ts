@@ -1,3 +1,4 @@
+import type { AnswerBody, Question } from "./types";
 import { createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -120,6 +121,11 @@ export class CloudClient {
 
 	stop(ns: string, name: string): Promise<{ stoppedRunning: boolean; cancelled: number }> {
 		return this.#json("POST", this.#ns(ns, name, "stop"));
+	}
+
+	/** Answers one question of a turn; `selected` holds option labels, `answer` free text. */
+	answer(ns: string, name: string, turn: number, question: number, body: AnswerBody): Promise<Question> {
+		return this.#json("POST", this.#ns(ns, name, `turns/${turn}/questions/${question}/answer`), { json: body });
 	}
 
 	async deleteThread(ns: string, name: string): Promise<void> {
