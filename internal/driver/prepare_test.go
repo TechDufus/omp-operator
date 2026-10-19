@@ -490,3 +490,17 @@ func TestGitCloneWithTokenAuthRuns(t *testing.T) {
 		t.Fatalf("README = %q", got)
 	}
 }
+
+// The workspace volume is owned by root while the agent is not: git must be told to trust it.
+func TestTrustWorkspace(t *testing.T) {
+	paths := testPaths(t)
+	d := &Driver{Paths: paths}
+	if err := d.trustWorkspace(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(paths.Home, ".gitconfig")
+	out, err := exec.Command("git", "config", "--file", cfg, "--get-all", "safe.directory").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != paths.Workspace {
+		t.Fatalf("safe.directory in %s = %q, %v; want %q", cfg, out, err, paths.Workspace)
+	}
+}

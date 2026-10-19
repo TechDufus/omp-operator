@@ -78,6 +78,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	omprpc "github.com/can1357/oh-my-pi/sdk/go/omp-rpc"
 )
@@ -206,8 +207,10 @@ type server struct {
 	hostToolsSet bool
 	lastReply    *string
 	sessionDir   string
-	waiting      map[string]chan omprpc.HostToolResult
-	activeAbort  map[int64]context.CancelFunc
+	// sessionPath is the file open_session chose to append to; empty means fake.jsonl in sessionDir.
+	sessionPath string
+	waiting     map[string]chan omprpc.HostToolResult
+	activeAbort map[int64]context.CancelFunc
 
 	seq atomic.Int64
 }
@@ -416,6 +419,45 @@ func sessionFiles(dir string) []string {
 	return files
 }
 
+// realSession returns the newest *.jsonl of dir that is a real omp session, one whose first
+// lines hold a {"type":"session","id":...} header, such as the conversation a handoff
+// restores, and that header's id. Like omp, open_session continues it instead of starting a
+// session of its own. Both are empty when there is none.
+func realSession(dir string) (path, id string) {
+	var newest time.Time
+	for _, file := range sessionFiles(dir) {
+		hdr := sessionHeaderID(file)
+		if hdr == "" {
+			continue
+		}
+		if st, err := os.Stat(file); err == nil && (path == "" || st.ModTime().After(newest)) {
+			path, id, newest = file, hdr, st.ModTime()
+		}
+	}
+	return path, id
+}
+
+// sessionHeaderID is the id of the session header among the first lines of file, or "".
+func sessionHeaderID(file string) string {
+	f, err := os.Open(file)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+	for range 20 {
+		if !sc.Scan() {
+			break
+		}
+		var hdr struct{ Type, ID string }
+		if json.Unmarshal(sc.Bytes(), &hdr) == nil && hdr.Type == "session" {
+			return hdr.ID
+		}
+	}
+	return ""
+}
+
 func (s *server) openSession(id string, line []byte) {
 	var params omprpc.OpenSessionCommand
 	if err := json.Unmarshal(line, &params); err != nil || params.SessionDir == "" {
@@ -423,24 +465,31 @@ func (s *server) openSession(id string, line []byte) {
 		return
 	}
 	resumed := len(sessionFiles(params.SessionDir)) > 0
+	path, realID := realSession(params.SessionDir)
 	s.mu.Lock()
-	s.sessionDir = params.SessionDir
+	s.sessionDir, s.sessionPath = params.SessionDir, path
 	s.mu.Unlock()
-	if err := s.appendSession(`{"type":"session","id":"` + sessionID + `"}`); err != nil {
+	sid, file := sessionID, filepath.Join(params.SessionDir, sessionFile)
+	if path != "" {
+		sid, file = realID, path
+	} else if err := s.appendSession(`{"type":"session","id":"` + sessionID + `"}`); err != nil {
 		s.fail(id, "open_session", "io_error", err.Error())
 		return
 	}
 	s.respond(id, "open_session", omprpc.OpenSessionResult{
 		Resumed:     resumed,
-		SessionID:   sessionID,
-		SessionFile: new(filepath.Join(params.SessionDir, sessionFile)),
+		SessionID:   sid,
+		SessionFile: new(file),
 	})
 }
 
-// appendSession appends a line to fake.jsonl in the session directory; it does nothing without one.
+// appendSession appends a line to the session file open_session chose (fake.jsonl in the
+// session directory by default); it does nothing without a session directory. In a resumed
+// real session the line becomes a custom entry chained to the last one, which omp loads and
+// ignores; a bare line would make omp fail to load the session.
 func (s *server) appendSession(line string) error {
 	s.mu.Lock()
-	dir := s.sessionDir
+	dir, path := s.sessionDir, s.sessionPath
 	s.mu.Unlock()
 	if dir == "" {
 		return nil
@@ -448,12 +497,49 @@ func (s *server) appendSession(line string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, sessionFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if path == "" {
+		path = filepath.Join(dir, sessionFile)
+	} else {
+		entry, err := customEntry(path, line)
+		if err != nil {
+			return err
+		}
+		line = entry
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
 	_, err = f.WriteString(line + "\n")
 	return errors.Join(err, f.Close())
+}
+
+// customEntry wraps text in an omp custom session entry whose parent is the newest entry of
+// the session file.
+func customEntry(path, text string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var parent any // JSON null when the file has no entry yet
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	for _, line := range slices.Backward(lines) {
+		var last struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+		}
+		if json.Unmarshal([]byte(line), &last) == nil && last.ID != "" && last.Type != "session" {
+			parent = last.ID
+			break
+		}
+	}
+	now := time.Now()
+	out, err := json.Marshal(map[string]any{
+		"type": "custom", "customType": "fakeomp-turn", "data": text,
+		"id": fmt.Sprintf("%08x", uint32(now.UnixNano())), "parentId": parent,
+		"timestamp": now.UTC().Format("2006-01-02T15:04:05.000Z"),
+	})
+	return string(out), err
 }
 
 func (s *server) exportHTML(id string, line []byte) {

@@ -183,9 +183,16 @@ type portForward struct {
 
 var forwardLine = regexp.MustCompile(`Forwarding from 127\.0\.0\.1:(\d+)`)
 
-func startPortForward(svc string, port int) *portForward {
+// startPortForward forwards a random local port to the operator's Service port.
+func startPortForward(port int) *portForward {
 	GinkgoHelper()
-	cmd := exec.Command("kubectl", "-n", systemNS, "port-forward", "svc/"+svc, fmt.Sprintf(":%d", port))
+	return startPortForwardIn(systemNS, "omp-operator", port)
+}
+
+// startPortForwardIn forwards a random local port to Service svc of namespace ns.
+func startPortForwardIn(ns, svc string, port int) *portForward {
+	GinkgoHelper()
+	cmd := exec.Command("kubectl", "-n", ns, "port-forward", "svc/"+svc, fmt.Sprintf(":%d", port))
 	cmd.Dir = projectDir
 	stdout, err := cmd.StdoutPipe()
 	Expect(err).NotTo(HaveOccurred())
@@ -297,12 +304,14 @@ func dumpDiagnostics() {
 	section("pods in "+agentNS, out, err)
 	out, err = run("kubectl", "-n", agentNS, "logs", "deployment/echo", "--tail=200")
 	section("echo server logs", out, err)
+	out, err = run("kubectl", "-n", agentNS, "logs", "deployment/gitserver", "--tail=100", "--ignore-errors")
+	section("git server logs", out, err)
 	out, err = run("kubectl", "-n", agentNS, "logs", "-l", "app.kubernetes.io/managed-by=omp-operator",
 		"--all-containers", "--prefix", "--tail=100", "--ignore-errors")
 	section("operator-managed pod logs", out, err)
 	out, err = run("kubectl", "-n", agentNS, "get", "events", "--sort-by=.lastTimestamp")
 	section("events in "+agentNS, out, err)
-	for _, r := range []string{"ompagents", "omptriggers", "ompactions", "ompsessions"} {
+	for _, r := range []string{"ompagents", "omptriggers", "ompactions", "ompsessions", "ompthreads"} {
 		out, err = run("kubectl", "-n", agentNS, "get", r+"."+apiGroup, "-o", "yaml")
 		section(r, out, err)
 	}

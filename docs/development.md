@@ -30,10 +30,10 @@ behind the others.
 | `run` | `manifests` | Runs the manager against your current kubeconfig (set `POD_NAMESPACE`; see below) |
 | `docker-build` | | Controller image (`IMG`, default `omp-operator:dev`) |
 | `docker-build-runtime` | | Runtime image (`RUNTIME_IMG`, default `omp-operator-runtime:dev`) |
-| `docker-build-e2e` | | e2e image: the driver plus `test/fakeomp` installed as `omp` (`E2E_IMG`, default `omp-operator-e2e:dev`) |
+| `docker-build-e2e` | | e2e image on `debian:trixie-slim` with git: the driver, `test/fakeomp` installed as `omp` and `test/gitserver` as `omp-e2e-gitserver` (`E2E_IMG`, default `omp-operator-e2e:dev`) |
 | `omp:download` | | Downloads the pinned omp release (`OMP_VERSION`) to `bin/omp-linux-x64` and checks it against the release's `SHA256SUMS.txt` |
 | `ompcompat` | `omp:download` | Runs `test/ompcompat` against the downloaded omp |
-| `test-e2e` | `docker-build`, `docker-build-e2e` | Creates a kind cluster `omp-operator-e2e` (unless it exists) with its own kubeconfig in `bin/` (your `~/.kube/config` is never touched), runs the e2e suite, and deletes the cluster on exit |
+| `test-e2e` | `omp:download`, `docker-build`, `docker-build-e2e` | Creates a kind cluster `omp-operator-e2e` (unless it exists) with its own kubeconfig in `bin/` (your `~/.kube/config` is never touched), runs the e2e suite with `OMP_BIN` set to the downloaded omp, and deletes the cluster on exit |
 | `dev:up` | | Creates (unless it exists) or updates the long-lived kind cluster `omp-dev`; see [dev cluster](#dev-cluster) |
 | `dev:login [anthropic\|openai-codex]` | | Logs the dev cluster's auth gateway in to a subscription |
 | `dev:status` | | Operator pods, agents, triggers and sessions of the dev cluster |
@@ -76,6 +76,7 @@ internal/store/      files under --data-dir     internal/notify/    sinks and no
 internal/dashboard/  web UI and access rules    internal/metrics/   collectors
 internal/driver/     what runs in the pod       internal/config/    operator-wide options
 test/fakeomp/        scripted fake `omp --mode rpc`
+test/fakeprovider/  fake OpenAI chat-completions provider
 test/ompcompat/      tests against the real pinned omp
 test/chart/          `helm template` assertions
 test/e2e/            kind end-to-end suite
@@ -100,13 +101,34 @@ images/runtime/      runtime image          images/e2e/  e2e image
   `fake reply`) and `mode` (`hang` or `exit-early`, as above). Whatever the turn, `get_last_assistant_text`
   answers with the reply, followed by the `FAKEOMP_ECHO_ENV` value when that is set, and the same text is sent as
   an assistant `message_end` event. fakeomp skips the `finish` call when the client registered host tools and
-  `finish` is not one of them, as in cloud threads.
+  `finish` is not one of them, as in cloud threads. When the session directory holds a real omp session (a `*.jsonl`
+  whose first lines carry a `{"type":"session"}` header, such as a restored handoff conversation), `open_session`
+  continues it, appending to that file and reporting its id and path, as omp does; otherwise it uses `fake.jsonl`.
+- **`test/gitserver`** is a smart-HTTP git server for the e2e suite: `git-http-backend` behind Basic auth
+  (`x-access-token:$GITSERVER_TOKEN`) over the bare repositories listed in `GITSERVER_REPOS`, rooted at
+  `GITSERVER_ROOT` (default `/repos`), on `:8080`. It runs from the e2e image as `omp-e2e-gitserver`.
+- **`test/fakeprovider`** (no build tag) is a fake OpenAI chat-completions provider shared by the ompcompat and e2e
+  suites: `fakeprovider.New(t, opts...)` starts an httptest server that streams a reply (`WithReply`, default
+  `done`) or, with `WithToolCall(tool, jsonArgs)`, calls a tool until the conversation holds a tool result. It counts
+  and records requests (`Count`, `Requests`, `RawRequests`), and `ModelsYAML()` is the `models.yml` that registers it
+  as provider `fake`, model `fake-model` (`fakeprovider.Model`).
 - **`test/ompcompat`** (build tag `ompcompat`, `mise run ompcompat`) checks the driver's assumptions against
-  the real pinned omp, including that the built-in tool list matches `actions.ReservedToolNames`. When
+  the real pinned omp, including that the built-in tool list matches `actions.ReservedToolNames`. It also loads
+  `clients/omp-cloud` into the real omp against a fake cloud API: `/cloud do it` must reach the extension (not the model),
+  upload a full-mode handoff whose conversation carries a new session id, and that conversation must resume in a fresh
+  omp at the same working directory. Two omp behaviours the tests pin: extension notifications only reach an RPC client
+  without `--no-ui`, and `open_session` cancels a resume whose working directory differs from the session's. When
   you bump the omp version (`OMP_VERSION` in `mise.toml`, `images/runtime/Dockerfile`, and the `omp-rpc`
   module in `go.mod`), this is the suite that tells you what changed.
 - **e2e** (build tag `e2e`, `mise run test-e2e`) installs the chart on kind with the e2e image and exercises
-  webhooks, schedules, actions, continuity, the dashboard and metrics.
+  webhooks, schedules, actions, continuity, the dashboard and metrics. The `cloud threads` spec runs the real pinned omp
+  (`$OMP_BIN`, from `omp:download`) with `clients/omp-cloud` in a throw-away HOME and repository under
+  `bin/e2e-client/`, against the cloud API of the kind cluster. Its repository's `origin` is the in-cluster git
+  server (`gitserver` in namespace `e2e`, reached from this machine through a port-forward and a repo-local
+  `url.<forward>.insteadOf`), and the owner's omp talks to `test/fakeprovider`. The cloud agent `cloud-fake` runs
+  fakeomp with `cloud.idleTimeout: 1m` (the shortest the API accepts), so the spec waits out two idle timeouts to
+  check the cold restore. It covers the handoff, the warm follow-up, redaction, the cold restore, `/cloud pull`,
+  `/cloud resume`, `/cloud stop`, API authentication, the dashboard thread page and the thread metrics.
 
 ## The driver in cloud threads
 

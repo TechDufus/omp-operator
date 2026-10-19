@@ -21,7 +21,6 @@ package ompcompat
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -33,146 +32,24 @@ import (
 
 	"github.com/TechDufus/omp-operator/internal/agentapi"
 	"github.com/TechDufus/omp-operator/internal/driver"
+	"github.com/TechDufus/omp-operator/test/fakeprovider"
 )
 
-const (
-	fakeModel    = "fake/fake-model"
-	systemMarker = "COMPAT-SYSTEM-PROMPT"
-)
-
-// chatRequest is the part of an OpenAI chat-completions request the fake model looks at.
-type chatRequest struct {
-	Messages []struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
-	} `json:"messages"`
-	Tools []struct {
-		Function struct {
-			Name string `json:"name"`
-		} `json:"function"`
-	} `json:"tools"`
-}
-
-func (r chatRequest) toolNames() []string {
-	names := make([]string, 0, len(r.Tools))
-	for _, tool := range r.Tools {
-		names = append(names, tool.Function.Name)
-	}
-	return names
-}
-
-func (r chatRequest) hasToolResult() bool {
-	return slices.ContainsFunc(r.Messages, func(m struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
-	}) bool {
-		return m.Role == "tool"
-	})
-}
-
-// fakeModelServer streams OpenAI chat-completions responses: a finish tool call until the
-// conversation holds a tool result, then the text "done".
-type fakeModelServer struct {
-	srv  *httptest.Server
-	mu   sync.Mutex
-	reqs []chatRequest
-	raw  []string
-}
-
-func newFakeModelServer(t *testing.T) *fakeModelServer {
-	t.Helper()
-	f := &fakeModelServer{}
-	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
-	t.Cleanup(f.srv.Close)
-	return f
-}
-
-func sseChunk(w io.Writer, v any) {
-	raw, _ := json.Marshal(v)
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", raw)
-	if fl, ok := w.(http.Flusher); ok {
-		fl.Flush()
-	}
-}
-
-func (f *fakeModelServer) handle(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/chat/completions") {
-		http.NotFound(w, r)
-		return
-	}
-	body, _ := io.ReadAll(r.Body)
-	var req chatRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	f.mu.Lock()
-	f.reqs = append(f.reqs, req)
-	f.raw = append(f.raw, string(body))
-	f.mu.Unlock()
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	chunk := func(delta map[string]any, finish any) map[string]any {
-		return map[string]any{
-			"id": "chatcmpl-compat", "object": "chat.completion.chunk", "created": 1, "model": "fake-model",
-			"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}},
-		}
-	}
-	usage := map[string]any{
-		"id": "chatcmpl-compat", "object": "chat.completion.chunk", "created": 1, "model": "fake-model",
-		"choices": []any{}, "usage": map[string]any{"prompt_tokens": 120, "completion_tokens": 12, "total_tokens": 132},
-	}
-	if req.hasToolResult() {
-		sseChunk(w, chunk(map[string]any{"role": "assistant", "content": "done"}, nil))
-		sseChunk(w, chunk(map[string]any{}, "stop"))
-	} else {
-		sseChunk(w, chunk(map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{
-			"index": 0, "id": "call_compat_1", "type": "function",
-			"function": map[string]any{"name": finishTool, "arguments": ""},
-		}}}, nil))
-		sseChunk(w, chunk(map[string]any{"tool_calls": []any{map[string]any{
-			"index": 0, "function": map[string]any{"arguments": finishArgs},
-		}}}, nil))
-		sseChunk(w, chunk(map[string]any{}, "tool_calls"))
-	}
-	sseChunk(w, usage)
-	_, _ = io.WriteString(w, "data: [DONE]\n\n")
-}
-
-func (f *fakeModelServer) requests() []chatRequest {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return slices.Clone(f.reqs)
-}
-
-func (f *fakeModelServer) rawRequests() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return slices.Clone(f.raw)
-}
+const systemMarker = "COMPAT-SYSTEM-PROMPT"
 
 // TestScriptedTurn is plan test 2: the driver's Run loop against the real omp, a fake
 // openai-completions provider and an httptest agent API. The model calls finish once, the call
 // reaches the API as an action, and the run is reported complete with finishCalled.
 func TestScriptedTurn(t *testing.T) {
-	model := newFakeModelServer(t)
+	model := fakeprovider.New(t, fakeprovider.WithToolCall(finishTool, finishArgs))
 	paths := testPaths(t)
-	writeFile(t, paths.OmpAgentDir+"/models.yml", fmt.Sprintf(`providers:
-  fake:
-    baseUrl: %s/v1
-    auth: none
-    api: openai-completions
-    models:
-      - id: fake-model
-        contextWindow: 128000
-        maxTokens: 4096
-`, model.srv.URL))
+	writeFile(t, paths.OmpAgentDir+"/models.yml", model.ModelsYAML())
 
 	api := newAgentAPI(t, driver.KindSessions)
 	api.cfg = agentapi.SessionConfig{
 		Prompt:         "Call finish with verdict ok.",
 		SystemPrompt:   systemMarker,
-		Model:          agentapi.ModelConfig{Default: fakeModel, Thinking: "off"},
+		Model:          agentapi.ModelConfig{Default: fakeprovider.Model, Thinking: "off"},
 		Tools:          agentapi.DefaultTools,
 		TimeoutSeconds: 120,
 		Actions:        []agentapi.ToolDef{finishDef(t)},
@@ -210,23 +87,23 @@ func TestScriptedTurn(t *testing.T) {
 		}
 	})
 
-	reqs := model.requests()
+	reqs := model.Requests()
 	if len(reqs) != 2 {
-		t.Fatalf("model saw %d requests, want 2 (finish call, then done):\n%v", len(reqs), model.rawRequests())
+		t.Fatalf("model saw %d requests, want 2 (finish call, then done):\n%v", len(reqs), model.RawRequests())
 	}
 	// The session's tools reached the model: allowed built-ins plus the essential host tool.
-	first := reqs[0].toolNames()
+	first := reqs[0].ToolNames()
 	for _, want := range append(slices.Clone(agentapi.DefaultTools), finishTool) {
 		if !slices.Contains(first, want) {
 			t.Errorf("first request tools = %v, want %q", first, want)
 		}
 	}
-	if !strings.Contains(model.rawRequests()[0], systemMarker) {
+	if !strings.Contains(model.RawRequests()[0], systemMarker) {
 		t.Errorf("--append-system-prompt text %q missing from the first request", systemMarker)
 	}
 	// The host tool's result went back to the model.
-	if !strings.Contains(model.rawRequests()[1], "finish recorded") {
-		t.Errorf("second request does not carry the finish result:\n%s", model.rawRequests()[1])
+	if !strings.Contains(model.RawRequests()[1], "finish recorded") {
+		t.Errorf("second request does not carry the finish result:\n%s", model.RawRequests()[1])
 	}
 }
 

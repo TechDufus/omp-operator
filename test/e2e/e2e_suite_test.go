@@ -19,6 +19,8 @@ limitations under the License.
 package e2e
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,6 +40,9 @@ const (
 	dashUser  = "e2e"
 	dashPass  = "e2e-dashboard-pass"
 	htpasswdS = "omp-dashboard-basic"
+
+	cloudTokenSecret  = "cloud-token-e2e"
+	viewerTokenSecret = "cloud-token-viewer"
 )
 
 var (
@@ -48,10 +53,16 @@ var (
 
 	projectDir string
 	echoImage  string // hashicorp/http-echo pinned by digest
+
+	// suiteT is the suite's *testing.T, for helpers that take a testing.TB (the fake provider).
+	suiteT *testing.T
+	// cloudToken and viewerToken are the cloud API bearer tokens: 32 random bytes in hex each.
+	cloudToken, viewerToken string
 )
 
 // TestE2E runs the e2e suite against the kind cluster that `mise run test-e2e` created.
 func TestE2E(t *testing.T) {
+	suiteT = t
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting omp-operator e2e suite\n")
 	RunSpecs(t, "omp-operator e2e suite")
@@ -77,10 +88,13 @@ var _ = BeforeSuite(func() {
 		mustApply(fmt.Sprintf("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n", ns))
 	}
 
-	By("creating the dashboard basic-auth Secret")
+	By("creating the dashboard basic-auth Secret and the cloud API token Secrets")
 	hash, err := bcrypt.GenerateFromPassword([]byte(dashPass), bcrypt.MinCost)
 	Expect(err).NotTo(HaveOccurred())
 	mustApply(secretYAML(systemNS, htpasswdS, map[string]string{"htpasswd": dashUser + ":" + string(hash) + "\n"}))
+	cloudToken, viewerToken = randomToken(), randomToken()
+	mustApply(secretYAML(systemNS, cloudTokenSecret, map[string]string{"token": cloudToken}))
+	mustApply(secretYAML(systemNS, viewerTokenSecret, map[string]string{"token": viewerToken}))
 
 	By("installing the chart")
 	values := map[string]any{
@@ -89,11 +103,14 @@ var _ = BeforeSuite(func() {
 		"rbac":         map[string]any{"agentNamespaces": []string{agentNS}},
 		"dashboard": map[string]any{
 			"basic": map[string]any{"existingSecret": htpasswdS},
-			"access": []map[string]any{{
-				"users":      []string{"basic:" + dashUser},
-				"namespaces": []string{"*"},
-				"role":       "viewer",
-			}},
+			"apiTokens": []map[string]any{
+				{"name": "e2e", "existingSecret": cloudTokenSecret},
+				{"name": "viewer", "existingSecret": viewerTokenSecret},
+			},
+			"access": []map[string]any{
+				{"users": []string{"basic:" + dashUser, "token:e2e"}, "namespaces": []string{"*"}, "role": "operator"},
+				{"users": []string{"token:viewer"}, "namespaces": []string{"*"}, "role": "viewer"},
+			},
 		},
 		"persistence": map[string]any{"size": "1Gi"},
 	}
@@ -143,6 +160,15 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// randomToken returns 32 random bytes as 64 hex characters.
+func randomToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
 }
 
 func findProjectDir() (string, error) {

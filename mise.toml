@@ -141,12 +141,13 @@ OMP_BIN="$PWD/bin/omp-linux-x64" go test -tags ompcompat ./test/ompcompat/ -v -c
 
 [tasks.test-e2e]
 description = "Run the e2e suite on a kind cluster"
-depends = ["docker-build", "docker-build-e2e"]
+depends = ["omp:download", "docker-build", "docker-build-e2e"]
 shell = "bash -c"
 run = '''
 set -euo pipefail
 export IMG="${IMG:-omp-operator:dev}"
 export E2E_IMG="${E2E_IMG:-omp-operator-e2e:dev}"
+export OMP_BIN="$PWD/bin/omp-linux-x64"
 export KIND_CLUSTER=omp-operator-e2e
 # A dedicated kubeconfig: kind create/delete must never touch ~/.kube/config.
 mkdir -p bin

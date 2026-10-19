@@ -69,9 +69,9 @@ var _ = Describe("omp-operator", Ordered, func() {
 		expectReady("omptriggers", "gen")
 		Expect(str(get("omptriggers", "am"), "status", "hookPath")).To(Equal("/hooks/e2e/am"))
 
-		hooks = startPortForward("omp-operator", 8082)
-		web = startPortForward("omp-operator", 8080)
-		metricsPF = startPortForward("omp-operator", 9090)
+		hooks = startPortForward(8082)
+		web = startPortForward(8080)
+		metricsPF = startPortForward(9090)
 	})
 
 	It("runs a manual session to ok, calls the echo action and notifies the webhook sink", func() {

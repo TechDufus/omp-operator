@@ -332,6 +332,50 @@ func TestOpenSessionResumes(t *testing.T) {
 	}
 }
 
+// A session directory that holds a real omp session (a restored handoff conversation) is
+// continued in place: no fake.jsonl, and what fakeomp appends keeps every line a valid entry.
+func TestOpenSessionContinuesRealSession(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "session")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(dir, "2026-10-19T04-17-08-220Z_real-id.jsonl")
+	history := `{"type":"title","v":1,"title":"","pad":""}` + "\n" +
+		`{"type":"session","version":3,"id":"real-id","cwd":"/x"}` + "\n" +
+		`{"type":"message","id":"aaaa1111","parentId":null,"message":{"role":"user","content":"hi"}}` + "\n"
+	if err := os.WriteFile(real, []byte(history), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := startIn(t, root, dir, "")
+	res, err := h.client.OpenSession(context.Background(), omprpc.OpenSessionCommand{SessionDir: dir})
+	if err != nil {
+		t.Fatalf("open_session: %v", err)
+	}
+	if !res.Resumed || res.SessionID != "real-id" || res.SessionFile == nil || *res.SessionFile != real {
+		t.Fatalf("open_session = %+v, want the real session resumed", res)
+	}
+	prompt(t, h)
+
+	if _, err := os.Stat(filepath.Join(dir, "fake.jsonl")); err == nil {
+		t.Error("fake.jsonl was created next to a real session")
+	}
+	raw, err := os.ReadFile(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 4 || !strings.HasPrefix(string(raw), history) {
+		t.Fatalf("session file = %q, want the history plus one appended entry", raw)
+	}
+	var entry struct{ Type, ID, ParentID string }
+	err = json.Unmarshal([]byte(lines[3]), &entry)
+	if err != nil || entry.Type != "custom" || entry.ID == "" || entry.ParentID != "aaaa1111" {
+		t.Fatalf("appended entry = %q (%+v, %v), want a custom entry chained to the last message", lines[3], entry, err)
+	}
+}
+
 func TestExitEarly(t *testing.T) {
 	h := start(t, `{"mode":"exit-early"}`)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

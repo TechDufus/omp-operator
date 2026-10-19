@@ -84,6 +84,22 @@ func (d *Driver) gitOutput(ctx context.Context, dir string, env []string, args .
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// trustWorkspace lists the workspace as a safe git directory in $HOME/.gitconfig, for the
+// driver, omp and every command omp runs. The kubelet creates the workspace volume owned by
+// root, and git refuses to work in a repository owned by another user ("dubious ownership"),
+// which the agent (uid 10001) would otherwise hit on its first git command.
+func (d *Driver) trustWorkspace() error {
+	if err := os.MkdirAll(d.Paths.Home, 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(d.Paths.Home, ".gitconfig"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(f, "[safe]\n\tdirectory = %s\n", d.Paths.Workspace)
+	return errors.Join(err, f.Close())
+}
+
 // gitEnv returns the environment variables that authenticate src, and a cleanup for
 // the temporary files they refer to.
 func gitEnv(src agentapi.GitSource) (env []string, cleanup func(), err error) {
