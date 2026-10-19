@@ -73,7 +73,7 @@ You need a cluster, `helm` and `kubectl`. This path uses a provider API key; see
 [model access](docs/model-access.md) for the auth-gateway, which keeps the key out of the pods.
 
 ```sh
-helm install omp oci://ghcr.io/techdufus/charts/omp-operator --version 0.2.1 \
+helm install omp oci://ghcr.io/techdufus/charts/omp-operator --version 0.2.2 \
   -n omp-system --create-namespace
 
 kubectl create namespace demo
