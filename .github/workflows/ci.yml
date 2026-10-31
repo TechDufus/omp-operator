@@ -8,21 +8,73 @@ on:
 permissions:
   contents: read
 
+# Go caches: each job restores its own key (it builds different packages and tags) and only pushes
+# to main save, so PRs never write caches and the parallel jobs never race on one key. A key is
+# immutable, so save is skipped on an exact hit; go.sum or Go version changes roll a new key.
 jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+      - id: go-env
+        name: resolve go cache paths
+        run: |
+          {
+            echo "version=$(go env GOVERSION)"
+            echo "gocache=$(go env GOCACHE)"
+            echo "gomodcache=$(go env GOMODCACHE)"
+            echo "lintcache=$(golangci-lint cache status | sed -n 's/^Dir: //p')"
+          } >> "$GITHUB_OUTPUT"
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+            ${{ steps.go-env.outputs.lintcache }}
+          key: go-${{ runner.os }}-${{ github.job }}-${{ steps.go-env.outputs.version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: go-${{ runner.os }}-${{ github.job }}-${{ steps.go-env.outputs.version }}-
       - run: mise run ci
       - run: mise run verify-generated
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+            ${{ steps.go-env.outputs.lintcache }}
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
   ompcompat:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+      - id: go-env
+        name: resolve go cache paths
+        run: |
+          {
+            echo "version=$(go env GOVERSION)"
+            echo "gocache=$(go env GOCACHE)"
+            echo "gomodcache=$(go env GOMODCACHE)"
+          } >> "$GITHUB_OUTPUT"
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-${{ runner.os }}-${{ github.job }}-${{ steps.go-env.outputs.version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: go-${{ runner.os }}-${{ github.job }}-${{ steps.go-env.outputs.version }}-
       - run: mise run ompcompat
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
   e2e:
     runs-on: ubuntu-latest
@@ -30,4 +82,28 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+      - id: go-env
+        name: resolve go cache paths
+        run: |
+          {
+            echo "version=$(go env GOVERSION)"
+            echo "gocache=$(go env GOCACHE)"
+            echo "gomodcache=$(go env GOMODCACHE)"
+          } >> "$GITHUB_OUTPUT"
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-${{ runner.os }}-${{ github.job }}-${{ steps.go-env.outputs.version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: go-${{ runner.os }}-${{ github.job }}-${{ steps.go-env.outputs.version }}-
+      # Only the host-side `go test -tags e2e` uses these; the image builds compile inside Docker.
       - run: mise run test-e2e
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
